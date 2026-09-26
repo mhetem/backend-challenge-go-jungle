@@ -1,0 +1,25 @@
+{
+  "eventId": "0192f2a1-7c3e-7d4a-9b5f-1e2d3c4b5a69",
+  "eventType": "WagerTransactionPendingReference",
+  "aggregateId": "0192f29a-5b6c-7d8e-9f01-2a3b4c5d6e7f",
+  "correlationId": "0192f2a2-9c1b-7e2a-8f00-5b7d3c2a1e90",
+  "occurredAt": "2026-09-26T12:00:00.123Z",
+  "version": 1,
+  "data": {
+    "transactionId": "0192f29a-5b6c-7d8e-9f01-2a3b4c5d6e7f",
+    "origin": "EXTERNAL",
+    "providerId": "provider-a",
+    "externalTransactionId": "transaction-124",
+    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+    "roundId": "round-987",
+    "gameId": "fortune-chimp",
+    "kind": "ROLLBACK",
+    "money": {
+      "amount": "25.00",
+      "currency": "BRL"
+    },
+    "referenceExternalTransactionId": "transaction-123",
+    "referenceDeadlineAt": "2026-09-26T12:15:00Z"
+  }
+}

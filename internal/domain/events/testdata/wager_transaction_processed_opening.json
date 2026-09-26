@@ -1,0 +1,24 @@
+{
+  "eventId": "0192f2a1-7c3e-7d4a-9b5f-1e2d3c4b5a69",
+  "eventType": "WagerTransactionProcessed",
+  "aggregateId": "5c1f0b8e-2d3a-5e4f-8a6b-7c8d9e0f1a2b",
+  "correlationId": "0192f2a2-9c1b-7e2a-8f00-5b7d3c2a1e90",
+  "occurredAt": "2026-09-26T12:00:00.123Z",
+  "version": 1,
+  "data": {
+    "transactionId": "5c1f0b8e-2d3a-5e4f-8a6b-7c8d9e0f1a2b",
+    "origin": "INTERNAL",
+    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+    "kind": "OPENING",
+    "money": {
+      "amount": "1000.00",
+      "currency": "BRL"
+    },
+    "balance": {
+      "amount": "1000.00",
+      "currency": "BRL"
+    },
+    "walletVersion": 1
+  }
+}

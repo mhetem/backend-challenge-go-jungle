@@ -40,19 +40,132 @@ Internamente:
 
 ## Máquina de estados
 
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: NewExternal
+    [*] --> PROCESSED: NewOpening
+    PENDING --> PROCESSED: MarkProcessed
+    PENDING --> REJECTED: Reject
+    PENDING --> FAILED: Fail
+    PENDING --> PENDING_REFERENCE: AwaitReference
+    PENDING_REFERENCE --> PENDING_REFERENCE: Reschedule
+    PENDING_REFERENCE --> PENDING: ResumeProcessing
+    PENDING_REFERENCE --> REJECTED: Reject
+    PENDING_REFERENCE --> FAILED: Fail
+```
+
+- `PENDING` só existe em memória. Uma operação síncrona vai de `PENDING` para `PROCESSED`,
+  `REJECTED` ou `PENDING_REFERENCE` dentro de uma única transação SQL, e `Rehydrate` recusa
+  um snapshot em `PENDING`.
+- `PENDING_REFERENCE` é o único estado não terminal gravado no banco. O resolver de qualquer
+  instância o retoma.
+- `PROCESSED`, `REJECTED` e `FAILED` são terminais: toda transição a partir deles retorna
+  `ErrTerminalState`. Uma transição fora do diagrama retorna `ErrInvalidTransition`.
+- O replay lê o resultado persistido e nunca chama as regras de novo.
+- `Rehydrate` valida o snapshot sem reaplicar transições, lançamentos ou eventos.
+- Todas as regras de negócio ficam em `wager.Rules.Apply`. HTTP, SQS e o resolver chamam essa
+  mesma função.
+
 ## Falhas transitórias vs permanentes
+
+- Transitórias: erro de conexão, SQLSTATE `08*`/`57P0*`/`53300`, `40001`, `40P01`, `55P03`,
+  deadline do contexto, 5xx ou throttling do SQS. São repetidas e nunca persistidas.
+- Permanentes: violação de integridade inesperada, estado gravado corrompido (um `Rehydrate`
+  que falha) ou retries transitórios esgotados no resolver. A transação vai para `FAILED`
+  com `PROCESSING_FAILED`, para auditoria.
+- Rejeição de negócio não é falha: a transação termina em `REJECTED` com um `failureCode`.
 
 ## Referências pendentes
 
+- A referência é resolvida por `(providerId, referenceExternalTransactionId)`. `REFUND` e
+  `ROLLBACK` exigem uma; `WIN` pode informar uma `BET`.
+- Referência ausente, ou presente mas ainda não terminal, deixa a transação em
+  `PENDING_REFERENCE`. A primeira espera grava o deadline (`agora + TTL`) e emite
+  `WagerTransactionPendingReference`. As tentativas seguintes só reagendam, sem evento.
+- `attempts` conta toda busca que não encontrou uma referência utilizável, inclusive a
+  síncrona. O próximo instante é `agora + backoff(attempts)`, limitado ao deadline.
+- Quando `attempts` chega ao máximo ou o deadline passa, a transação vira `REJECTED`, com
+  `REFERENCE_NOT_FOUND` se a referência nunca apareceu, ou `REFERENCE_NOT_SETTLED` se ela
+  existe mas não terminou. O evento `WagerTransactionRejected` é emitido.
+- Uma referência que terminou sem sucesso (`REJECTED` ou `FAILED`) rejeita a transação na
+  hora, com `REFERENCE_NOT_PROCESSED`.
+- Tipo, provider, jogador, carteira, rodada, moeda e valor da referência nunca mudam, então
+  são checados antes do status. Uma referência que nunca vai servir é rejeitada na hora, sem
+  esperar o TTL.
+
 ## Política de reversão
 
+- Cada transação referenciada recebe no máximo uma reversão processada, de qualquer tipo.
+  Uma `BET` é reembolsada **ou** desfeita, nunca as duas coisas.
+- Um `REFUND` pode ser desfeito uma vez (`ROLLBACK` do `REFUND`). Depois disso a `BET` não
+  pode ser reembolsada de novo, porque já tem uma reversão processada. Assim o mesmo débito
+  nunca é devolvido duas vezes.
+- `REFUND` só referencia `BET`. `ROLLBACK` referencia `BET`, `WIN` ou `REFUND`; `ROLLBACK`
+  de `ROLLBACK`, `LOSS` ou `OPENING` retorna `REFERENCE_KIND_NOT_REVERSIBLE`.
+- O valor da reversão é igual ao da referência, porque reversões parciais estão fora do
+  escopo. Um valor diferente retorna `REFERENCE_AMOUNT_MISMATCH`.
+- Um `ROLLBACK` que precisaria debitar mais que o saldo é rejeitado com
+  `REVERSAL_INSUFFICIENT_FUNDS`, diferente do `INSUFFICIENT_FUNDS` de uma aposta.
+- O domínio recebe a informação "já revertida" junto com a referência. Um índice único
+  parcial no banco garante a mesma regra.
+
 ## Códigos de falha
+
+"Corrigível" quer dizer que a requisição estava errada: o provider pode corrigi-la e reenviar
+com um novo `externalTransactionId` e uma nova chave, já que a transação rejeitada é
+terminal. "Definitivo" quer dizer que a requisição era coerente e a resposta é não.
+
+| Código | Quando | Tipo |
+|---|---|---|
+| `WALLET_NOT_FOUND` | A carteira não existe | Corrigível |
+| `WALLET_PLAYER_MISMATCH` | A carteira é de outro jogador | Corrigível |
+| `CURRENCY_MISMATCH` | A moeda difere da moeda da carteira | Corrigível |
+| `REFERENCE_NOT_FOUND` | A referência não apareceu até o TTL ou o limite de tentativas | Corrigível |
+| `REFERENCE_MISMATCH` | A referência difere em provider, jogador, carteira, rodada ou moeda, ou o `WIN` não referencia uma `BET` | Corrigível |
+| `REFERENCE_KIND_NOT_REVERSIBLE` | O tipo da referência não pode ser revertido por esta operação | Corrigível |
+| `REFERENCE_AMOUNT_MISMATCH` | O valor da reversão difere do valor referenciado | Corrigível |
+| `INSUFFICIENT_FUNDS` | A `BET` excede o saldo | Definitivo |
+| `REVERSAL_INSUFFICIENT_FUNDS` | O `ROLLBACK` debitaria mais que o saldo | Definitivo |
+| `REFERENCE_NOT_SETTLED` | A referência existe, mas não terminou até o TTL ou o limite de tentativas | Definitivo |
+| `REFERENCE_NOT_PROCESSED` | A referência terminou em `REJECTED` ou `FAILED` | Definitivo |
+| `ALREADY_REVERSED` | A referência já tem uma reversão processada | Definitivo |
+| `BALANCE_OVERFLOW` | O crédito passaria do maior saldo representável | Definitivo |
+| `PROCESSING_FAILED` | Falha permanente de infraestrutura (estado `FAILED`) | Definitivo |
+
+Quando mais de uma regra falha, vale a primeira nesta ordem: carteira (existência, jogador,
+moeda), referência (tipo, identidade, valor, status, reversão anterior) e, por último, o
+efeito no saldo. As rejeições de carteira não devolvem saldo, para não expor o saldo de
+outro jogador. As demais guardam o saldo observado na rejeição, e o replay o devolve.
 
 ## Inbox e outbox
 
 ## Contratos SQS
 
 ## Contratos e roteamento de eventos
+
+Envelope de todo evento:
+
+| Campo | Conteúdo |
+|---|---|
+| `eventId` | UUIDv5 de `(transactionId, eventType)` |
+| `eventType` | `WagerTransactionProcessed`, `WagerTransactionRejected`, `WagerTransactionPendingReference` ou `WalletBalanceChanged` |
+| `aggregateId` | `transactionId` nos eventos de transação; `walletId` em `WalletBalanceChanged` |
+| `correlationId` | O da requisição que criou a transação |
+| `causationId` | Só em `WalletBalanceChanged`: o `transactionId` que moveu o saldo |
+| `occurredAt` | UTC, RFC 3339 |
+| `version` | `1` em todos os tipos, definido pelo construtor |
+| `data` | Payload tipado do evento |
+
+- Cada transação emite cada tipo de evento no máximo uma vez, então o `eventId` é
+  determinístico. Uma republicação carrega o mesmo `eventId`, e a chave primária da outbox
+  impede que o mesmo evento seja gravado duas vezes.
+- Valores monetários seguem o contrato de `Money`: `{"amount":"25.00","currency":"BRL"}`.
+- Os eventos de `OPENING` têm `origin: "INTERNAL"` e omitem provider, ids externos, rodada e
+  jogo.
+- `WalletBalanceChanged` traz `walletId`, `transactionId`, `direction`, `money`,
+  `balanceBefore`, `balanceAfter` e `walletVersion`. Consumidores ordenam por
+  `walletVersion`.
+- A chave de partição de todo evento é o `walletId`.
 
 ## Identity provider e validação de token
 
@@ -99,3 +212,7 @@ bateram com a AWS:
   provisionados, e só são aplicados na AWS real.
 - Localmente, o `SenderId` é o account id para qualquer credencial, então o consumer não o usa
   para identificar o provider. O provider do envelope é validado contra o banco.
+- `BET` e `LOSS` não aceitam `referenceExternalTransactionId`, e nenhuma operação pode
+  referenciar a si mesma. As duas situações são entrada inválida.
+- A referência de um `WIN` é opcional e não tem regra de valor: um prêmio não precisa ser
+  igual à aposta.
