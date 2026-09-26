@@ -26,6 +26,7 @@ func TestErrorClassification(t *testing.T) {
 		{domain.ErrCurrencyMismatch, domain.Rejected},
 		{domain.ErrTerminalState, domain.Conflict},
 		{domain.ErrInvalidTransition, domain.Conflict},
+		{domain.ErrWalletExists, domain.Conflict},
 		{domain.ErrWalletNotFound, domain.NotFound},
 		{domain.ErrTransactionNotFound, domain.NotFound},
 	}

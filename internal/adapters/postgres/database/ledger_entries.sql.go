@@ -47,3 +47,47 @@ func (q *Queries) InsertLedgerEntry(ctx context.Context, arg InsertLedgerEntryPa
 	)
 	return err
 }
+
+const listLedgerEntries = `-- name: ListLedgerEntries :many
+SELECT id, wallet_id, transaction_id, direction, amount_minor, currency, balance_before_minor, balance_after_minor, wallet_version, created_at FROM ledger_entries
+WHERE wallet_id = $1 AND wallet_version > $2
+ORDER BY wallet_version
+LIMIT $3
+`
+
+type ListLedgerEntriesParams struct {
+	WalletID      uuid.UUID
+	WalletVersion int64
+	Limit         int32
+}
+
+func (q *Queries) ListLedgerEntries(ctx context.Context, arg ListLedgerEntriesParams) ([]LedgerEntry, error) {
+	rows, err := q.db.Query(ctx, listLedgerEntries, arg.WalletID, arg.WalletVersion, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LedgerEntry{}
+	for rows.Next() {
+		var i LedgerEntry
+		if err := rows.Scan(
+			&i.ID,
+			&i.WalletID,
+			&i.TransactionID,
+			&i.Direction,
+			&i.AmountMinor,
+			&i.Currency,
+			&i.BalanceBeforeMinor,
+			&i.BalanceAfterMinor,
+			&i.WalletVersion,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

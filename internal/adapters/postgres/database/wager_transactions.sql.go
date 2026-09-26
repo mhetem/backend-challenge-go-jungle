@@ -12,6 +12,130 @@ import (
 	"github.com/google/uuid"
 )
 
+const getTransaction = `-- name: GetTransaction :one
+SELECT id, origin, kind, status, wallet_id, player_id, currency, amount_minor, provider_id, external_transaction_id, idempotency_key, payload_hash, round_id, game_id, reference_external_transaction_id, reference_transaction_id, correlation_id, failure_code, result_balance_minor, result_wallet_version, attempts, next_attempt_at, reference_deadline_at, created_at, updated_at, completed_at FROM wager_transactions WHERE id = $1
+`
+
+func (q *Queries) GetTransaction(ctx context.Context, id uuid.UUID) (WagerTransaction, error) {
+	row := q.db.QueryRow(ctx, getTransaction, id)
+	var i WagerTransaction
+	err := row.Scan(
+		&i.ID,
+		&i.Origin,
+		&i.Kind,
+		&i.Status,
+		&i.WalletID,
+		&i.PlayerID,
+		&i.Currency,
+		&i.AmountMinor,
+		&i.ProviderID,
+		&i.ExternalTransactionID,
+		&i.IdempotencyKey,
+		&i.PayloadHash,
+		&i.RoundID,
+		&i.GameID,
+		&i.ReferenceExternalTransactionID,
+		&i.ReferenceTransactionID,
+		&i.CorrelationID,
+		&i.FailureCode,
+		&i.ResultBalanceMinor,
+		&i.ResultWalletVersion,
+		&i.Attempts,
+		&i.NextAttemptAt,
+		&i.ReferenceDeadlineAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
+const getTransactionByExternalID = `-- name: GetTransactionByExternalID :one
+SELECT id, origin, kind, status, wallet_id, player_id, currency, amount_minor, provider_id, external_transaction_id, idempotency_key, payload_hash, round_id, game_id, reference_external_transaction_id, reference_transaction_id, correlation_id, failure_code, result_balance_minor, result_wallet_version, attempts, next_attempt_at, reference_deadline_at, created_at, updated_at, completed_at FROM wager_transactions WHERE provider_id = $1 AND external_transaction_id = $2
+`
+
+type GetTransactionByExternalIDParams struct {
+	ProviderID            *string
+	ExternalTransactionID *string
+}
+
+func (q *Queries) GetTransactionByExternalID(ctx context.Context, arg GetTransactionByExternalIDParams) (WagerTransaction, error) {
+	row := q.db.QueryRow(ctx, getTransactionByExternalID, arg.ProviderID, arg.ExternalTransactionID)
+	var i WagerTransaction
+	err := row.Scan(
+		&i.ID,
+		&i.Origin,
+		&i.Kind,
+		&i.Status,
+		&i.WalletID,
+		&i.PlayerID,
+		&i.Currency,
+		&i.AmountMinor,
+		&i.ProviderID,
+		&i.ExternalTransactionID,
+		&i.IdempotencyKey,
+		&i.PayloadHash,
+		&i.RoundID,
+		&i.GameID,
+		&i.ReferenceExternalTransactionID,
+		&i.ReferenceTransactionID,
+		&i.CorrelationID,
+		&i.FailureCode,
+		&i.ResultBalanceMinor,
+		&i.ResultWalletVersion,
+		&i.Attempts,
+		&i.NextAttemptAt,
+		&i.ReferenceDeadlineAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
+const getTransactionByIdempotencyKey = `-- name: GetTransactionByIdempotencyKey :one
+SELECT id, origin, kind, status, wallet_id, player_id, currency, amount_minor, provider_id, external_transaction_id, idempotency_key, payload_hash, round_id, game_id, reference_external_transaction_id, reference_transaction_id, correlation_id, failure_code, result_balance_minor, result_wallet_version, attempts, next_attempt_at, reference_deadline_at, created_at, updated_at, completed_at FROM wager_transactions WHERE provider_id = $1 AND idempotency_key = $2
+`
+
+type GetTransactionByIdempotencyKeyParams struct {
+	ProviderID     *string
+	IdempotencyKey *string
+}
+
+func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, arg GetTransactionByIdempotencyKeyParams) (WagerTransaction, error) {
+	row := q.db.QueryRow(ctx, getTransactionByIdempotencyKey, arg.ProviderID, arg.IdempotencyKey)
+	var i WagerTransaction
+	err := row.Scan(
+		&i.ID,
+		&i.Origin,
+		&i.Kind,
+		&i.Status,
+		&i.WalletID,
+		&i.PlayerID,
+		&i.Currency,
+		&i.AmountMinor,
+		&i.ProviderID,
+		&i.ExternalTransactionID,
+		&i.IdempotencyKey,
+		&i.PayloadHash,
+		&i.RoundID,
+		&i.GameID,
+		&i.ReferenceExternalTransactionID,
+		&i.ReferenceTransactionID,
+		&i.CorrelationID,
+		&i.FailureCode,
+		&i.ResultBalanceMinor,
+		&i.ResultWalletVersion,
+		&i.Attempts,
+		&i.NextAttemptAt,
+		&i.ReferenceDeadlineAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
 const insertTransaction = `-- name: InsertTransaction :exec
 INSERT INTO wager_transactions (
     id, origin, kind, status, wallet_id, player_id, currency, amount_minor,
@@ -87,4 +211,73 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		arg.CompletedAt,
 	)
 	return err
+}
+
+const updateTransactionState = `-- name: UpdateTransactionState :execrows
+UPDATE wager_transactions
+SET status = $2, failure_code = $3, reference_transaction_id = $4, result_balance_minor = $5,
+    result_wallet_version = $6, attempts = $7, next_attempt_at = $8, reference_deadline_at = $9,
+    updated_at = $10, completed_at = $11
+WHERE id = $1 AND status = 'PENDING_REFERENCE'
+`
+
+type UpdateTransactionStateParams struct {
+	ID                     uuid.UUID
+	Status                 string
+	FailureCode            *string
+	ReferenceTransactionID *uuid.UUID
+	ResultBalanceMinor     *int64
+	ResultWalletVersion    *int64
+	Attempts               int32
+	NextAttemptAt          *time.Time
+	ReferenceDeadlineAt    *time.Time
+	UpdatedAt              time.Time
+	CompletedAt            *time.Time
+}
+
+func (q *Queries) UpdateTransactionState(ctx context.Context, arg UpdateTransactionStateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateTransactionState,
+		arg.ID,
+		arg.Status,
+		arg.FailureCode,
+		arg.ReferenceTransactionID,
+		arg.ResultBalanceMinor,
+		arg.ResultWalletVersion,
+		arg.Attempts,
+		arg.NextAttemptAt,
+		arg.ReferenceDeadlineAt,
+		arg.UpdatedAt,
+		arg.CompletedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const wakeDependents = `-- name: WakeDependents :execrows
+UPDATE wager_transactions
+SET next_attempt_at = $4
+WHERE provider_id = $1 AND reference_external_transaction_id = $2 AND wallet_id = $3
+  AND status = 'PENDING_REFERENCE' AND next_attempt_at > $4
+`
+
+type WakeDependentsParams struct {
+	ProviderID                     *string
+	ReferenceExternalTransactionID *string
+	WalletID                       uuid.UUID
+	NextAttemptAt                  *time.Time
+}
+
+func (q *Queries) WakeDependents(ctx context.Context, arg WakeDependentsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, wakeDependents,
+		arg.ProviderID,
+		arg.ReferenceExternalTransactionID,
+		arg.WalletID,
+		arg.NextAttemptAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

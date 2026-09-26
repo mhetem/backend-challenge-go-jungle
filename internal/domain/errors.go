@@ -35,6 +35,7 @@ var (
 	ErrCurrencyMismatch    = &Error{Code: "CURRENCY_MISMATCH", Category: Rejected}
 	ErrTerminalState       = &Error{Code: "TERMINAL_STATE", Category: Conflict}
 	ErrInvalidTransition   = &Error{Code: "INVALID_TRANSITION", Category: Conflict}
+	ErrWalletExists        = &Error{Code: "WALLET_ALREADY_EXISTS", Category: Conflict}
 	ErrWalletNotFound      = &Error{Code: "WALLET_NOT_FOUND", Category: NotFound}
 	ErrTransactionNotFound = &Error{Code: "TRANSACTION_NOT_FOUND", Category: NotFound}
 )

@@ -12,6 +12,44 @@ import (
 	"github.com/google/uuid"
 )
 
+const getWallet = `-- name: GetWallet :one
+SELECT id, player_id, currency, balance_minor, version, created_at, updated_at FROM wallets WHERE id = $1
+`
+
+func (q *Queries) GetWallet(ctx context.Context, id uuid.UUID) (Wallet, error) {
+	row := q.db.QueryRow(ctx, getWallet, id)
+	var i Wallet
+	err := row.Scan(
+		&i.ID,
+		&i.PlayerID,
+		&i.Currency,
+		&i.BalanceMinor,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getWalletForUpdate = `-- name: GetWalletForUpdate :one
+SELECT id, player_id, currency, balance_minor, version, created_at, updated_at FROM wallets WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetWalletForUpdate(ctx context.Context, id uuid.UUID) (Wallet, error) {
+	row := q.db.QueryRow(ctx, getWalletForUpdate, id)
+	var i Wallet
+	err := row.Scan(
+		&i.ID,
+		&i.PlayerID,
+		&i.Currency,
+		&i.BalanceMinor,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const insertWallet = `-- name: InsertWallet :exec
 INSERT INTO wallets (id, player_id, currency, balance_minor, version, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7)

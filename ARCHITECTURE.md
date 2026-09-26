@@ -89,6 +89,33 @@ de constraint estável, que a aplicação usa para classificar o erro.
 
 ## Fronteira da transação
 
+- Os casos de uso são donos da transação, e os repositórios nunca abrem uma.
+  `TxRunner.InTx(ctx, fn)` abre a transação em `READ COMMITTED` e chama `fn` com um `Store`.
+  Os repositórios do `Store` (`Wallets`, `Transactions`, `Ledger`, `Outbox`, `Inbox`) usam
+  todos a mesma `pgx.Tx`. Se `fn` retornar `nil`, o runner faz o commit; qualquer erro faz
+  rollback.
+- O `Store` é o único acesso ao banco dentro da transação. Por isso "tudo no mesmo commit"
+  aparece na própria chamada: carteira, transação, lançamento, outbox e inbox.
+- Toda transação define `lock_timeout` e `statement_timeout` com `SET LOCAL`, no mesmo round
+  trip do `BEGIN`. Nada vaza para o próximo uso da conexão.
+  `idle_in_transaction_session_timeout` fica configurado no papel `wallet_app`.
+- `InTx` repete a transação inteira, com limite e backoff exponencial com jitter, em dois
+  casos:
+  - serialization failure, deadlock e lock timeout;
+  - `23505` nos índices de chave de idempotência, id externo e reversão. Isso é uma corrida
+    perdida, e a nova execução encontra a vencedora.
+
+  Por isso `fn` precisa poder rodar de novo: ela relê tudo pelo `Store`.
+- Erros de conexão não são repetidos dentro de `InTx`, porque um `COMMIT` perdido tem
+  resultado desconhecido. Quem chamou tenta de novo (HTTP 503, visibilidade do SQS, próximo
+  ciclo do resolver), e a idempotência absorve a repetição.
+- `InReadOnlySnapshot` usa `REPEATABLE READ READ ONLY`. Todas as leituras da reconciliação
+  veem o mesmo instante, e qualquer escrita é recusada.
+- Os repositórios recebem e devolvem agregados do domínio. Gravam `Snapshot()` e leem com
+  `Rehydrate`. Uma linha que não passa na validação do domínio é tratada como estado
+  corrompido, uma falha permanente.
+- Nenhuma query usa `now()`: todo horário vem do relógio da aplicação, como no domínio.
+
 ## Idempotência
 
 HTTP e SQS montam o mesmo comando. O corpo do `POST /wagering/transactions` e o `data` da
@@ -153,11 +180,22 @@ stateDiagram-v2
 
 ## Falhas transitórias vs permanentes
 
-- Transitórias: erro de conexão, SQLSTATE `08*`/`57P0*`/`53300`, `40001`, `40P01`, `55P03`,
-  deadline do contexto, 5xx ou throttling do SQS. São repetidas e nunca persistidas.
-- Permanentes: violação de integridade inesperada, estado gravado corrompido (um `Rehydrate`
-  que falha) ou retries transitórios esgotados no resolver. A transação vai para `FAILED`
-  com `PROCESSING_FAILED`, para auditoria.
+O adapter do Postgres classifica todo erro em um de quatro tipos, com `errors.Is` sobre
+sentinels de `app` e do domínio. O erro original continua acessível por `errors.As`.
+
+- Transitórias (`app.ErrTransient`): contexto cancelado ou expirado, e qualquer falha para
+  alcançar o servidor (conexão recusada ou perdida, inclusive falha de autenticação ao
+  conectar). Também os SQLSTATE `08*`, `53*`, `57P0*`, `57014` (statement timeout), `25P03`,
+  `40001`, `40P01` e `55P03`, além de 5xx ou throttling do SQS. São repetidas e nunca
+  persistidas.
+- Conflito repetível (`app.ErrRetryableConflict`): `23505` nos índices de chave de
+  idempotência, id externo e reversão, ou um `UPDATE` condicional que não encontrou a linha
+  na versão ou no estado esperado. `InTx` repete a transação na hora.
+- Erro de domínio: `23505` em `wallets_player_currency_key` vira `WALLET_ALREADY_EXISTS`.
+- Permanentes (`app.ErrPermanent`): qualquer outra violação de integridade (`CHECK`, FK,
+  triggers), estado gravado corrompido (um `Rehydrate` que falha) ou retries transitórios
+  esgotados no resolver. A transação vai para `FAILED` com `PROCESSING_FAILED`, para
+  auditoria.
 - Rejeição de negócio não é falha: a transação termina em `REJECTED` com um `failureCode`.
 
 ## Referências pendentes
