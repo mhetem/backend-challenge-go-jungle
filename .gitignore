@@ -1,0 +1,7 @@
+.env
+/bin/
+*.test
+*.out
+*.prof
+
+BUILD_PLAN.md
