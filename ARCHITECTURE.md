@@ -36,6 +36,36 @@ Internamente:
 
 ## Idempotência
 
+HTTP e SQS montam o mesmo comando. O corpo do `POST /wagering/transactions` e o `data` da
+mensagem `WagerTransactionRequested` são o mesmo contrato; o SQS só acrescenta
+`idempotencyKey`, que no HTTP vem do header `Idempotency-Key`. O servidor nunca troca a chave
+recebida por uma calculada.
+
+Hash do payload:
+- SHA-256, em hex minúsculo, do JSON canônico dos campos de negócio: `providerId`,
+  `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`,
+  `money{amount,currency}` e, só quando presente, `referenceExternalTransactionId`.
+- Ficam de fora a chave de idempotência, o `messageId`, o `occurredAt`, o tipo do envelope,
+  headers e claims do token. Por isso a mesma operação tem o mesmo hash nos dois canais, e um
+  teste compara o corpo HTTP e a mensagem SQS do enunciado.
+- JSON canônico: chaves em ordem lexicográfica de bytes, sem espaços, sem escape de HTML e sem
+  quebra de linha no final.
+- A única normalização é renderizar os UUIDs no formato canônico em minúsculas. Os demais
+  formatos são estritos e não têm duas grafias para o mesmo valor:
+  - valor com exatamente duas casas decimais;
+  - moeda e `kind` em maiúsculas;
+  - identificadores em ASCII visível.
+
+Formato dos campos, validado antes das regras de negócio:
+- Identificadores (`providerId`, `externalTransactionId`, `roundId`, `gameId`,
+  `referenceExternalTransactionId`), a chave de idempotência e o correlation id têm de 1 a
+  128 caracteres ASCII visíveis (0x21–0x7E). Espaço não é aceito: o HTTP remove espaços das
+  pontas de um header e o SQS não, então a mesma chave poderia chegar diferente por canal.
+- UUIDs só no formato de 36 caracteres com hífens, em maiúsculas ou minúsculas. O UUID nulo é
+  rejeitado.
+- Todos os erros de formato voltam juntos, um por campo. Só depois vêm as regras do domínio:
+  `OPENING` proibido, política de valor zero e presença da referência.
+
 ## Locking e concorrência
 
 ## Máquina de estados

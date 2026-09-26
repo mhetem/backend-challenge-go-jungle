@@ -43,19 +43,21 @@ func txID(extID string) uuid.UUID {
 func params(t *testing.T, extID string, kind wager.Kind, minor int64, ref string) wager.ExternalParams {
 	t.Helper()
 	return wager.ExternalParams{
-		ID:                             txID(extID),
-		ProviderID:                     "provider-a",
-		ExternalTransactionID:          extID,
-		IdempotencyKey:                 "provider-a:" + extID,
-		PayloadHash:                    "hash-" + extID,
-		WalletID:                       walletID,
-		PlayerID:                       playerID,
-		RoundID:                        "round-987",
-		GameID:                         "fortune-chimp",
-		Kind:                           kind,
-		Money:                          brl(t, minor),
-		ReferenceExternalTransactionID: ref,
-		CorrelationID:                  "corr-" + extID,
+		Payload: wager.Payload{
+			ProviderID:                     "provider-a",
+			ExternalTransactionID:          extID,
+			PlayerID:                       playerID,
+			WalletID:                       walletID,
+			RoundID:                        "round-987",
+			GameID:                         "fortune-chimp",
+			Kind:                           kind,
+			Money:                          brl(t, minor),
+			ReferenceExternalTransactionID: ref,
+		},
+		ID:             txID(extID),
+		IdempotencyKey: "provider-a:" + extID,
+		PayloadHash:    "hash-" + extID,
+		CorrelationID:  "corr-" + extID,
 	}
 }
 

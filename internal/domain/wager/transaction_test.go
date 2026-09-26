@@ -102,9 +102,9 @@ func TestNewExternalRejectsInvalidInput(t *testing.T) {
 
 func TestNewExternalReportsEveryField(t *testing.T) {
 	_, err := wager.NewExternal(wager.ExternalParams{}, time.Time{})
-	want := "id: REQUIRED\nproviderId: REQUIRED\nexternalTransactionId: REQUIRED\nidempotencyKey: REQUIRED\n" +
-		"payloadHash: REQUIRED\nwalletId: REQUIRED\nplayerId: REQUIRED\nroundId: REQUIRED\ngameId: REQUIRED\n" +
-		"kind: INVALID_VALUE\nmoney: REQUIRED\ncorrelationId: REQUIRED\ncreatedAt: REQUIRED"
+	want := "id: REQUIRED\nproviderId: REQUIRED\nexternalTransactionId: REQUIRED\nplayerId: REQUIRED\n" +
+		"walletId: REQUIRED\nroundId: REQUIRED\ngameId: REQUIRED\nkind: INVALID_VALUE\nmoney: REQUIRED\n" +
+		"idempotencyKey: REQUIRED\npayloadHash: REQUIRED\ncorrelationId: REQUIRED\ncreatedAt: REQUIRED"
 	if err == nil || err.Error() != want {
 		t.Fatalf("err = %v; want %q", err, want)
 	}

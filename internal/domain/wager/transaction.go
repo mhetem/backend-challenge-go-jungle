@@ -43,20 +43,24 @@ type Snapshot struct {
 	CompletedAt                    time.Time
 }
 
-type ExternalParams struct {
-	ID                             uuid.UUID
+type Payload struct {
 	ProviderID                     string
 	ExternalTransactionID          string
-	IdempotencyKey                 string
-	PayloadHash                    string
-	WalletID                       uuid.UUID
 	PlayerID                       uuid.UUID
+	WalletID                       uuid.UUID
 	RoundID                        string
 	GameID                         string
 	Kind                           Kind
 	Money                          money.Money
 	ReferenceExternalTransactionID string
-	CorrelationID                  string
+}
+
+type ExternalParams struct {
+	Payload
+	ID             uuid.UUID
+	IdempotencyKey string
+	PayloadHash    string
+	CorrelationID  string
 }
 
 type Transaction struct {
@@ -65,21 +69,31 @@ type Transaction struct {
 
 const referenceField = "referenceExternalTransactionId"
 
-func NewExternal(p ExternalParams, now time.Time) (*Transaction, error) {
+func (p Payload) Validate() error {
 	var v domain.Validation
-	v.Check(p.ID != uuid.Nil, "id", domain.ErrRequired)
+	p.check(&v)
+	return v.Err()
+}
+
+func (p Payload) check(v *domain.Validation) {
 	v.Check(p.ProviderID != "", "providerId", domain.ErrRequired)
 	v.Check(p.ExternalTransactionID != "", "externalTransactionId", domain.ErrRequired)
-	v.Check(p.IdempotencyKey != "", "idempotencyKey", domain.ErrRequired)
-	v.Check(p.PayloadHash != "", "payloadHash", domain.ErrRequired)
-	v.Check(p.WalletID != uuid.Nil, "walletId", domain.ErrRequired)
 	v.Check(p.PlayerID != uuid.Nil, "playerId", domain.ErrRequired)
+	v.Check(p.WalletID != uuid.Nil, "walletId", domain.ErrRequired)
 	v.Check(p.RoundID != "", "roundId", domain.ErrRequired)
 	v.Check(p.GameID != "", "gameId", domain.ErrRequired)
 	v.Check(p.Kind.Valid(), "kind", domain.ErrInvalidValue)
 	v.Check(p.Kind != Opening, "kind", domain.ErrKindNotAllowed)
 	v.CheckAmount("money", p.Money, p.Kind.amountRule())
-	checkReference(&v, p.Kind, p.ReferenceExternalTransactionID, p.ExternalTransactionID)
+	checkReference(v, p.Kind, p.ReferenceExternalTransactionID, p.ExternalTransactionID)
+}
+
+func NewExternal(p ExternalParams, now time.Time) (*Transaction, error) {
+	var v domain.Validation
+	v.Check(p.ID != uuid.Nil, "id", domain.ErrRequired)
+	p.check(&v)
+	v.Check(p.IdempotencyKey != "", "idempotencyKey", domain.ErrRequired)
+	v.Check(p.PayloadHash != "", "payloadHash", domain.ErrRequired)
 	v.Check(p.CorrelationID != "", "correlationId", domain.ErrRequired)
 	v.Check(!now.IsZero(), "createdAt", domain.ErrRequired)
 	if err := v.Err(); err != nil {
