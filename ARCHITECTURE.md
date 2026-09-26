@@ -2,6 +2,34 @@
 
 ## Money
 
+Valores monetários são `int64` em minor units (centavos) mais um código ISO 4217. Só moedas
+com duas casas decimais são aceitas: BRL, USD e EUR. O intervalo vai até
+±92.233.720.368.547.758,07, muito além de qualquer wallet. Nenhum caminho usa `float`.
+
+Contrato externo:
+- O `amount` é sempre uma string JSON no formato `^(0|[1-9]\d*)\.\d{2}$`, e a `currency`
+  é o código em maiúsculas: `{"amount":"25.00","currency":"BRL"}`.
+- Os valores abaixo são rejeitados, nunca arredondados:
+  - `25.00` como número JSON;
+  - `"25"`, `"1.5"`, `"01.00"`, `"+1.00"` e `"1e2"`;
+  - espaços;
+  - valores negativos.
+- Como o formato é estrito, cada valor tem uma única representação textual, e o hash do
+  payload não precisa normalizar amounts.
+
+Internamente:
+- O parse acumula dígito a dígito com checagem de overflow. `strconv.ParseFloat` nunca é
+  usado.
+- `ParseSigned` aceita um `-` inicial para valores internos (por exemplo, a soma do ledger
+  na reconciliação) e rejeita `-0.00`.
+- `Add`, `Sub` e `Neg` retornam `ErrOverflow` em vez de dar a volta. Operações entre moedas
+  diferentes retornam `ErrCurrencyMismatch`.
+- O zero value de `Money` é inválido: todo método retorna `ErrUninitialized`, então um valor
+  esquecido nunca vira `0.00` em silêncio.
+- Erros de parse são `*ParseError{Input, Reason}`. O `Reason` é um dos sentinels
+  (`ErrInvalidAmount`, `ErrInvalidCurrency`, `ErrOverflow`, `ErrInvalidJSON`) e funciona com
+  `errors.Is` e `errors.As`.
+
 ## Acesso ao banco e mapeamento de Money
 
 ## Fronteira da transação
