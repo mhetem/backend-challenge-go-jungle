@@ -32,6 +32,61 @@ Internamente:
 
 ## Acesso ao banco e mapeamento de Money
 
+- Driver: pgx v5 com `pgxpool`. As queries são SQL escrito à mão, com parâmetros
+  posicionais (`$1`), e o sqlc (v1.31.1) as compila em funções Go tipadas, validando cada
+  query contra o schema das migrations. Não há ORM.
+- O código gerado fica versionado em `internal/adapters/postgres/database`. O CI roda
+  `sqlc diff` e falha se ele divergir das queries.
+- Migrations com goose, em SQL, embutidas no binário `migrate` (`up`, `down`, `status`,
+  `reset`). Toda migration tem `Down`, e os grants do papel da aplicação vivem nas próprias
+  migrations.
+- `Money` vira duas colunas: `*_minor BIGINT` com as unidades mínimas e `currency CHAR(3)`.
+  O valor é gravado e lido exatamente como o `int64` do domínio, sem `NUMERIC` nem `float`.
+- Dois papéis no Postgres:
+  - `wallet_migrator` é dono do banco e do schema e roda as migrations;
+  - `wallet_app` só tem `SELECT`/`INSERT`/`UPDATE` nas tabelas de que precisa, e não pode
+    alterar schema, desligar triggers nem apagar linhas.
+
+## Invariantes no banco
+
+As invariantes financeiras valem mesmo que o código da aplicação erre. Cada uma tem um nome
+de constraint estável, que a aplicação usa para classificar o erro.
+
+- Saldo nunca negativo: `CHECK (balance_minor >= 0)` na carteira e nos saldos do ledger.
+- Todo saldo alterado tem lançamento:
+  - uma constraint trigger adiada (`wallets_ledger_coupling`) roda no commit. Se o saldo
+    mudou, exige `version = anterior + 1` e um lançamento com
+    `(wallet_id, wallet_version, saldo anterior, saldo posterior)` iguais;
+  - se o saldo não mudou, a versão também não pode mudar;
+  - uma segunda trigger (`ledger_entries_wallet_coupling`) impede lançamento à frente da
+    versão da carteira;
+  - com `UNIQUE (wallet_id, wallet_version)`, lançamentos e mudanças de saldo ficam em
+    correspondência um para um.
+- Lançamento coerente:
+  - aritmética `after = before ± amount` por direção;
+  - `amount > 0`, então `LOSS` nunca gera lançamento;
+  - chaves estrangeiras compostas obrigam o lançamento a ter a moeda da carteira e a
+    carteira, a moeda e o valor da sua transação.
+- Ledger append-only: `UPDATE`, `DELETE` e `TRUNCATE` são revogados do papel da aplicação,
+  e triggers os recusam até para o dono da tabela.
+- Sem movimentação duplicada:
+  - `UNIQUE (wallet_id, transaction_id)` no ledger;
+  - `UNIQUE (provider_id, idempotency_key)` e `UNIQUE (provider_id,
+    external_transaction_id)` nas transações;
+  - no máximo um `OPENING` por carteira;
+  - no máximo uma reversão processada por transação referenciada.
+- Transação terminal congelada: uma trigger recusa qualquer alteração depois de `PROCESSED`,
+  `REJECTED` ou `FAILED`. Identidade, valor, hash e referência externa são imutáveis em
+  qualquer estado, e a referência resolvida só pode ser gravada uma vez.
+- `PENDING` nunca é gravado: o `CHECK` de status só aceita `PENDING_REFERENCE` e os estados
+  terminais.
+- Origem: `INTERNAL` se e somente se `OPENING`, sem nenhum metadado externo. Operações
+  externas exigem provider existente, ids e chave no formato do contrato e hash SHA-256 em
+  hex.
+- Outbox: o envelope gravado (id, tipo, versão, agregado, payload, horários) é imutável; só
+  as colunas de entrega mudam.
+- Carteira: id, jogador, moeda e criação são imutáveis, e carteiras não são apagadas.
+
 ## Fronteira da transação
 
 ## Idempotência
@@ -202,6 +257,23 @@ Envelope de todo evento:
 ## Modelo de permissões
 
 ## Controle de acesso ao broker
+
+`deploy/aws/provision.sh` cria as filas e um usuário IAM por papel, cada um com uma policy
+restrita às filas de que precisa:
+
+| Usuário | Permissões |
+|---|---|
+| `provider-producer` | `SendMessage` em `wager-transactions.fifo` |
+| `wallet-service` | Receber, apagar e mudar visibilidade em `wager-transactions.fifo`; enviar para `wager-transactions-dlq.fifo` e `wallet-events.fifo` |
+| `events-reader` | Receber, apagar e mudar visibilidade em `wallet-events.fifo` |
+
+Todas as filas são FIFO, com `ContentBasedDeduplication=false` e `VisibilityTimeout=30`:
+- `wager-transactions.fifo` faz long polling de 20 s e manda a mensagem para
+  `wager-transactions-dlq.fifo` depois de 10 recebimentos;
+- `wallet-events.fifo` usa a mesma regra de 10 recebimentos, com `wallet-events-dlq.fifo`;
+- as DLQs guardam mensagens por 14 dias.
+
+O script é idempotente e pode rodar de novo a qualquer momento.
 
 ## Emulador AWS local
 

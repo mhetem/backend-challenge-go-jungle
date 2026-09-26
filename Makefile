@@ -1,4 +1,7 @@
-.PHONY: test test-race vet test-integration test-e2e check up down migrate-up migrate-down smoke
+-include .env
+export
+
+.PHONY: test test-race vet test-integration test-e2e check generate deps up down migrate-up migrate-down migrate-status migrate-reset smoke
 
 test:
 	go test ./...
@@ -26,8 +29,19 @@ check:
 	go vet -tags e2e,failpoints ./...
 	staticcheck ./...
 	govulncheck ./...
+	sqlc diff
 	go test -race -count=1 -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out | tail -1
+	$(MAKE) deps
+	go run ./cmd/migrate up
+	go test -race -tags integration -count=1 -timeout 15m ./...
+
+generate:
+	sqlc generate
+
+deps:
+	docker compose up -d --wait postgres keycloak aws
+	docker compose run --rm aws-init
 
 up:
 	docker compose up --build -d --wait
@@ -40,6 +54,12 @@ migrate-up:
 
 migrate-down:
 	go run ./cmd/migrate down
+
+migrate-status:
+	go run ./cmd/migrate status
+
+migrate-reset:
+	go run ./cmd/migrate reset
 
 smoke:
 	./scripts/smoke.sh
