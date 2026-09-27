@@ -7,6 +7,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/httpapi"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/oidc"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/postgres"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/sqs"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
@@ -27,6 +28,7 @@ func Options(cfg config.Config) fx.Option {
 		health.Module,
 		postgres.Module,
 		sqs.Module,
+		oidc.Module,
 		metrics.Module,
 		appModule,
 		httpapi.Module,

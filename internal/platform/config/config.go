@@ -35,6 +35,7 @@ type Config struct {
 	Database         Database
 	AWS              AWS
 	SQS              SQS
+	OIDC             OIDC
 	PendingReference PendingReference
 }
 
@@ -57,6 +58,12 @@ type SQS struct {
 	InputDLQ          string
 	EventsQueue       string
 	VisibilityTimeout time.Duration
+}
+
+type OIDC struct {
+	Issuer   string
+	JWKSURL  string
+	Audience string
 }
 
 type PendingReference struct {
@@ -98,6 +105,10 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 			EventsQueue:       e.text("SQS_EVENTS_QUEUE", "wallet-events.fifo"),
 			VisibilityTimeout: e.duration("SQS_VISIBILITY_TIMEOUT", 30*time.Second),
 		},
+		OIDC: OIDC{
+			Issuer:   e.link("OIDC_ISSUER", "http://localhost:8080/realms/wagering", "http", "https"),
+			Audience: e.text("OIDC_AUDIENCE", "wagering-api"),
+		},
 		PendingReference: PendingReference{
 			TTL:         e.duration("PENDING_REF_TTL", 15*time.Minute),
 			MaxAttempts: e.positive("PENDING_REF_MAX_ATTEMPTS", 20),
@@ -105,6 +116,7 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 			BackoffCap:  e.duration("PENDING_REF_BACKOFF_CAP", time.Minute),
 		},
 	}
+	cfg.OIDC.JWKSURL = e.link("OIDC_JWKS_URL", strings.TrimSuffix(cfg.OIDC.Issuer, "/")+"/protocol/openid-connect/certs", "http", "https")
 	if cfg.ShutdownTimeout >= cfg.SQS.VisibilityTimeout {
 		e.fail("SHUTDOWN_TIMEOUT", "must be shorter than SQS_VISIBILITY_TIMEOUT (%s)", cfg.SQS.VisibilityTimeout)
 	}
@@ -138,6 +150,8 @@ func (c Config) LogValue() slog.Value {
 		slog.String("awsEndpointUrl", c.AWS.EndpointURL),
 		slog.String("inputQueue", c.SQS.InputQueue),
 		slog.String("eventsQueue", c.SQS.EventsQueue),
+		slog.String("oidcIssuer", c.OIDC.Issuer),
+		slog.String("oidcJwksUrl", c.OIDC.JWKSURL),
 	)
 }
 

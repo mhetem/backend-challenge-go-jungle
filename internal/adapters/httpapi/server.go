@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/fx"
 
+	"github.com/mhetem/backend-challenge-go-jungle/internal/auth"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/config"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/health"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/lifecycle"
@@ -26,9 +27,14 @@ type Server struct {
 	*lifecycle.HTTPServer
 }
 
-func NewServer(cfg config.Config, checker *health.Checker, reg prometheus.Registerer, log *slog.Logger) (*Server, error) {
+func NewServer(cfg config.Config, checker *health.Checker, authn auth.Authenticator, reg prometheus.Registerer, log *slog.Logger) (*Server, error) {
+	protect, err := authentication(authn, reg, log)
+	if err != nil {
+		return nil, err
+	}
 	mux := http.NewServeMux()
 	checker.Register(mux)
+	mux.Handle("/", protect(http.HandlerFunc(notFound)))
 	handler, err := instrument(reg, recoverer(log, mux))
 	if err != nil {
 		return nil, err
@@ -42,4 +48,8 @@ func NewServer(cfg config.Config, checker *health.Checker, reg prometheus.Regist
 		IdleTimeout:       60 * time.Second,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}, log)}, nil
+}
+
+func notFound(w http.ResponseWriter, _ *http.Request) {
+	writeProblem(w, http.StatusNotFound, "NOT_FOUND", "no such resource", false)
 }

@@ -46,6 +46,10 @@ func TestDefaults(t *testing.T) {
 		q.EventsQueue != "wallet-events.fifo" || q.VisibilityTimeout != 30*time.Second || cfg.AWS.EndpointURL != "" {
 		t.Fatalf("SQS defaults = %+v, %+v", q, cfg.AWS)
 	}
+	if o := cfg.OIDC; o.Issuer != "http://localhost:8080/realms/wagering" || o.Audience != "wagering-api" ||
+		o.JWKSURL != "http://localhost:8080/realms/wagering/protocol/openid-connect/certs" {
+		t.Fatalf("OIDC defaults = %+v", o)
+	}
 	if p := cfg.PendingReference; p.TTL != 15*time.Minute || p.MaxAttempts != 20 || p.BackoffBase != time.Second || p.BackoffCap != time.Minute {
 		t.Fatalf("pending reference defaults = %+v", p)
 	}
@@ -60,6 +64,7 @@ func TestOverrides(t *testing.T) {
 	vars["SHUTDOWN_TIMEOUT"] = "5s"
 	vars["AWS_ENDPOINT_URL"] = "http://aws:4566"
 	vars["SQS_INPUT_QUEUE"] = "test-input.fifo"
+	vars["OIDC_ISSUER"] = "https://idp.example.com/realms/wagering/"
 	cfg, err := config.Parse(lookup(vars))
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +73,8 @@ func TestOverrides(t *testing.T) {
 		t.Fatalf("components = %v; want outbox and http", cfg.Components)
 	}
 	if cfg.LogLevel != slog.LevelDebug || cfg.HTTPAddr != "127.0.0.1:0" || cfg.Database.MaxConns != 4 ||
-		cfg.ShutdownTimeout != 5*time.Second || cfg.AWS.EndpointURL != "http://aws:4566" || cfg.SQS.InputQueue != "test-input.fifo" {
+		cfg.ShutdownTimeout != 5*time.Second || cfg.AWS.EndpointURL != "http://aws:4566" || cfg.SQS.InputQueue != "test-input.fifo" ||
+		cfg.OIDC.JWKSURL != "https://idp.example.com/realms/wagering/protocol/openid-connect/certs" {
 		t.Fatalf("overrides not applied: %+v", cfg)
 	}
 }
@@ -95,6 +101,8 @@ func TestInvalidValues(t *testing.T) {
 		{"connections beyond int32", map[string]string{"DB_MAX_CONNS": "3000000000"}, `DB_MAX_CONNS: must be a positive integer, got "3000000000"`},
 		{"shutdown outlasting visibility", map[string]string{"SHUTDOWN_TIMEOUT": "30s"}, "SHUTDOWN_TIMEOUT: must be shorter than SQS_VISIBILITY_TIMEOUT (30s)"},
 		{"backoff base above its cap", map[string]string{"PENDING_REF_BACKOFF_BASE": "2m"}, "PENDING_REF_BACKOFF_BASE: must not exceed PENDING_REF_BACKOFF_CAP (1m0s)"},
+		{"issuer without a scheme", map[string]string{"OIDC_ISSUER": "localhost:8080/realms/wagering"}, "OIDC_ISSUER: must be a http or https URL with a host"},
+		{"jwks over ftp", map[string]string{"OIDC_JWKS_URL": "ftp://keycloak/certs"}, "OIDC_JWKS_URL: must be a http or https URL with a host"},
 		{"empty queue name", map[string]string{"SQS_EVENTS_QUEUE": ""}, ""},
 	}
 	for _, tt := range tests {

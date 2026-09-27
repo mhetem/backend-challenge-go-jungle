@@ -345,7 +345,70 @@ Envelope de todo evento:
 
 ## Identity provider e validação de token
 
+O IdP é o Keycloak (26.7.4, no compose), com o realm `wagering` importado de
+`deploy/keycloak/realm-wagering.json`. Ele é o IdP recomendado pelo desafio, roda localmente
+sem conta externa e emite JWTs RS256 com `client_credentials`, o fluxo de serviço para
+serviço. O serviço não guarda senhas nem emite tokens.
+
+- Cada integração é um client confidencial que só pode usar service account:
+  - `provider-a` e `provider-b` têm o papel `wager-provider` e uma claim fixa
+    `provider_id`, igual ao id do client;
+  - `wallet-backoffice` tem o papel `wallet-operator`;
+  - os três recebem a audiência `wagering-api` por um mapper.
+- Os segredos dos clients ficam só no `.env` (`PROVIDER_A_SECRET`, …), como as senhas do
+  banco. O arquivo do realm usa placeholders `${VAR}`, que o Keycloak resolve na importação,
+  e o compose repassa as variáveis. `.env.example` traz valores de desenvolvimento local.
+  `scripts/get-token.sh <client>` devolve um access token.
+- Validação local, sem chamar o Keycloak por requisição:
+  - As chaves públicas vêm do JWKS do realm e ficam em cache. Um `kid` desconhecido força
+    uma nova busca, o que cobre a rotação de chaves.
+  - Só RS256 é aceito: `none`, HMAC e outros algoritmos são recusados antes de olhar as
+    claims.
+  - `iss` tem de ser exatamente o issuer configurado, `aud` tem de conter `wagering-api`, e
+    `exp` precisa estar no futuro (sem tolerância).
+  - `typ` tem de ser `Bearer`, o que recusa ID token e refresh token. `sub` e `azp` são
+    obrigatórios.
+- O issuer é fixado por `KC_HOSTNAME=http://localhost:8080`. Assim o `iss` é o mesmo para
+  quem pede o token pelo host e para os containers, que buscam as chaves em
+  `http://keycloak:8080/...` (`OIDC_JWKS_URL`).
+- O Keycloak não é dependência de inicialização. Se o JWKS estiver inacessível quando a chave
+  ainda não está em cache, a resposta é 503 `TEMPORARILY_UNAVAILABLE`, não 401: o token pode
+  estar certo, e quem está fora é o IdP.
+- Trade-off da validação local: sem introspecção, o caminho quente não depende do Keycloak.
+  Em troca, um token revogado continua válido até o `exp`, então os tokens duram pouco
+  (5 min).
+
+Respostas de autenticação (`application/problem+json`):
+
+| Situação | Status | Detalhe |
+|---|---|---|
+| Sem `Authorization: Bearer …` | 401 | `WWW-Authenticate: Bearer realm="wagering"`, `code: UNAUTHENTICATED` |
+| Token inválido, expirado, de outro issuer ou audiência, assinatura errada | 401 | igual, mais `error="invalid_token"` |
+| Chaves do IdP inacessíveis | 503 | `Retry-After`, `code: TEMPORARILY_UNAVAILABLE`, `retryable: true` |
+| Token válido sem permissão para a operação | 403 | `code: FORBIDDEN` (fase 9) |
+
 ## Modelo de permissões
+
+A identidade vem só do token. O `providerId` do corpo ou do path é comparado com a claim
+`provider_id`, e nunca vale sozinho.
+
+| Operação | Quem pode | Caso contrário |
+|---|---|---|
+| `POST /wagering/transactions` | `wager-provider` cujo `provider_id` é o `providerId` do corpo | 403, antes de qualquer acesso ao banco |
+| `GET /providers/{providerId}/wagering/transactions/{id}` | o próprio provider, ou `wallet-operator` | 403 |
+| `GET /wagering/transactions/{id}` | `wallet-operator`, ou o provider dono da transação | 404 idêntico ao de inexistente, para não revelar que a transação existe |
+| Carteiras: abrir, ler, ledger, reconciliação | `wallet-operator` | 403 |
+
+- Um provider nunca vê transações de outro, nem por replay. A chave de idempotência e o id
+  externo valem dentro do provider do token, então repetir a chave de outro provider cria
+  uma operação separada em vez de devolver a dele.
+- Uma claim `provider_id` sem o papel `wager-provider` não dá acesso a nada.
+- Transações `OPENING` não têm provider e só são visíveis para `wallet-operator`.
+- `/health/*` é público. Qualquer outro caminho exige token, inclusive os que não existem:
+  sem token a resposta é 401, e só com token um caminho desconhecido vira 404. Assim a
+  estrutura das rotas não vaza.
+- As decisões são funções puras em `internal/auth`, testadas isoladamente e com tokens reais
+  do Keycloak.
 
 ## Controle de acesso ao broker
 
@@ -466,3 +529,7 @@ Sequência:
   referenciar a si mesma. As duas situações são entrada inválida.
 - A referência de um `WIN` é opcional e não tem regra de valor: um prêmio não precisa ser
   igual à aposta.
+- Um token com `kid` desconhecido força uma busca no JWKS. A biblioteca junta buscas
+  simultâneas, mas não limita a frequência. Um limite por intervalo fica como trabalho
+  pendente.
+- Tokens revogados continuam aceitos até expirar (validação local, sem introspecção).

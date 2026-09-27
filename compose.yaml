@@ -14,8 +14,12 @@ x-app: &app
     AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     AWS_ENDPOINT_URL: http://aws:4566
+    OIDC_ISSUER: http://localhost:8080/realms/wagering
+    OIDC_JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
   depends_on:
     postgres:
+      condition: service_healthy
+    keycloak:
       condition: service_healthy
     migrate:
       condition: service_completed_successfully
@@ -57,6 +61,12 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD}
       KC_HEALTH_ENABLED: "true"
       KC_HOSTNAME: http://localhost:8080
+      PROVIDER_A_SECRET: ${PROVIDER_A_SECRET}
+      PROVIDER_B_SECRET: ${PROVIDER_B_SECRET}
+      WALLET_BACKOFFICE_SECRET: ${WALLET_BACKOFFICE_SECRET}
+      PROVIDER_A_SHORTLIVED_SECRET: ${PROVIDER_A_SHORTLIVED_SECRET}
+      NO_ROLE_CLIENT_SECRET: ${NO_ROLE_CLIENT_SECRET}
+      NO_AUDIENCE_CLIENT_SECRET: ${NO_AUDIENCE_CLIENT_SECRET}
     ports:
       - "8080:8080"
     volumes:

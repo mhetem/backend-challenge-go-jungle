@@ -111,8 +111,8 @@ func TestServiceStartsServesAndStopsCleanly(t *testing.T) {
 			t.Fatalf("/metrics = %d without %q:\n%s", code, series, exposition)
 		}
 	}
-	if code, _ := c.get("http://" + public.Addr() + "/metrics"); code != http.StatusNotFound {
-		t.Fatalf("public server exposes /metrics (%d); it belongs on the admin port only", code)
+	if code, _ := c.get("http://" + public.Addr() + "/metrics"); code != http.StatusUnauthorized {
+		t.Fatalf("public /metrics = %d; want 401: it belongs on the admin port, and every other public path needs a token", code)
 	}
 
 	service.RequireStop()

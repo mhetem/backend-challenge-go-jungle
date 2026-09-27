@@ -9,8 +9,10 @@ import (
 	"go.uber.org/fx/fxtest"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/httpapi"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/oidc"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/sqs"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/auth"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/config"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/health"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/logging"
@@ -45,8 +47,11 @@ func TestGraphIsComplete(t *testing.T) {
 		public  *httpapi.Server
 		admin   *metrics.Admin
 		checker *health.Checker
+		tokens  *oidc.Verifier
+		authn   auth.Authenticator
 	)
-	err := fx.ValidateApp(Options(testConfig(t)), fx.Populate(&wallets, &wagers, &runner, &pool, &queues, &public, &admin, &checker))
+	err := fx.ValidateApp(Options(testConfig(t)),
+		fx.Populate(&wallets, &wagers, &runner, &pool, &queues, &public, &admin, &checker, &tokens, &authn))
 	if err != nil {
 		t.Fatal(err)
 	}
