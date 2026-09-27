@@ -1,5 +1,34 @@
 name: wager-service
 
+x-app: &app
+  build: .
+  image: wager-service:local
+  environment:
+    COMPONENTS: http,consumer,outbox,resolver
+    LOG_LEVEL: info
+    HTTP_ADDR: ":8080"
+    ADMIN_ADDR: ":9090"
+    SHUTDOWN_TIMEOUT: 20s
+    DATABASE_URL: postgres://wallet_app:${WALLET_APP_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    AWS_REGION: ${AWS_REGION}
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    AWS_ENDPOINT_URL: http://aws:4566
+  depends_on:
+    postgres:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+    aws-init:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/wallet", "healthcheck"]
+    interval: 5s
+    timeout: 6s
+    retries: 12
+    start_period: 10s
+  stop_grace_period: 30s
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -63,6 +92,37 @@ services:
     depends_on:
       aws:
         condition: service_healthy
+
+  migrate:
+    build: .
+    image: wager-service:local
+    entrypoint: ["/usr/local/bin/migrate", "up"]
+    environment:
+      MIGRATE_DATABASE_URL: postgres://wallet_migrator:${WALLET_MIGRATOR_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app-1:
+    <<: *app
+    hostname: app-1
+    ports:
+      - "8081:8080"
+      - "9091:9090"
+
+  app-2:
+    <<: *app
+    hostname: app-2
+    ports:
+      - "8082:8080"
+      - "9092:9090"
+
+  app-3:
+    <<: *app
+    hostname: app-3
+    ports:
+      - "8083:8080"
+      - "9093:9090"
 
 volumes:
   postgres-data:

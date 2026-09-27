@@ -1,7 +1,7 @@
 -include .env
 export
 
-.PHONY: test test-race vet test-integration test-e2e check generate deps up down migrate-up migrate-down migrate-status migrate-reset smoke
+.PHONY: test test-race vet test-integration test-e2e check generate deps up down run migrate-up migrate-down migrate-status migrate-reset smoke
 
 test:
 	go test ./...
@@ -48,6 +48,9 @@ up:
 
 down:
 	docker compose down -v
+
+run:
+	go run ./cmd/wallet
 
 migrate-up:
 	go run ./cmd/migrate up

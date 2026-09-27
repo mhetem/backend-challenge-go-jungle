@@ -1,10 +1,8 @@
+.git
+.github
 .env
-/bin/
+*.out
 /wallet
 /migrate
-*.test
-*.out
-*.prof
-
 BUILD_PLAN.md
 brief.md

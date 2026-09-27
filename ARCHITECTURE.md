@@ -397,7 +397,64 @@ bateram com a AWS:
 
 ## Módulos Fx e sequência de shutdown
 
+O domínio e os casos de uso não conhecem Fx. A composição fica em `internal/bootstrap`, e cada
+adapter ou componente de plataforma expõe um `fx.Module`. Os construtores são puros: nenhum
+abre conexão nem inicia goroutine. Cada módulo registra os seus hooks num único `fx.Invoke`.
+
+| Módulo | Fornece | Hooks |
+|---|---|---|
+| `logging` | `*slog.Logger` JSON, com os atributos do contexto | — |
+| `health` | `*health.Checker`, que agrega os checks do grupo `health.checks` | — |
+| `postgres` | `*pgxpool.Pool`, `app.TxRunner`, check `postgres` | start: ping com retry; stop: fecha o pool |
+| `sqs` | cliente SQS, check `sqs` | start: resolve as URLs das filas com retry; stop: fecha conexões ociosas |
+| `metrics` | registry Prometheus, `app.Metrics`, servidor admin | start/stop do servidor admin (`/metrics`, `/health/*`) |
+| `app` | `WalletService`, `WagerService`, regras, relógio, ids | — |
+| `httpapi` | servidor HTTP público | start/stop, só com o componente `http` ativo |
+
+Sequência:
+- O `main` carrega a configuração antes do Fx. Qualquer valor inválido encerra o processo
+  com todos os problemas listados.
+- **Start:** dependências → servidores → workers, na ordem dos módulos.
+  - O pool só é considerado pronto depois de um ping bem-sucedido, e as filas depois de
+    resolvidas. As duas coisas são tentadas de novo até `START_TIMEOUT`.
+  - O servidor faz `net.Listen` dentro do hook, então porta ocupada falha a inicialização.
+- **Stop:** ordem inversa, dentro de `SHUTDOWN_TIMEOUT`.
+  1. O primeiro passo é o drain: a readiness passa a responder 503.
+  2. Os workers (fases 10–12) cancelam o contexto e esperam as goroutines.
+  3. Os servidores fazem `Shutdown` e terminam as requisições em andamento.
+  4. O SQS fecha as conexões ociosas.
+  5. Por último, o pool fecha, depois de tudo que o usa.
+- `COMPONENTS=http,consumer,outbox,resolver` escolhe o que a instância executa. Os módulos
+  ficam sempre no grafo, e um componente desligado só não registra os seus hooks. Com isso
+  a validação do grafo (`fx.ValidateApp`) cobre tudo em qualquer combinação.
+- `SHUTDOWN_TIMEOUT` (20 s) tem de ser menor que a visibilidade do SQS (30 s), e a
+  configuração recusa o contrário. No compose, `stop_grace_period` é 30 s, maior que o
+  timeout.
+
 ## Observabilidade
+
+- Logs JSON em stderr, com `instanceId` em toda linha.
+  - `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId` entram no
+    contexto com `logging.With` e aparecem em todo log que recebe esse contexto.
+  - Chaves com `authorization`, `password`, `secret`, `token` ou `cookie` são mascaradas, e
+    a URL do banco aparece sem a senha.
+  - Payloads financeiros completos não são logados.
+- Métricas Prometheus em `ADMIN_ADDR` (`/metrics`), num registry próprio:
+  - runtime Go e processo;
+  - `wallet_http_requests_total{method,route,status}` e
+    `wallet_http_request_duration_seconds{method,route}`. `route` é o padrão da rota
+    (`GET /wallets/{walletId}`), não a URL, então a cardinalidade fica limitada;
+  - `wallet_reconciliation_divergences_total`.
+
+  As métricas de consumer, outbox e resolver entram nas fases correspondentes.
+- Health checks:
+  - `/health/live` responde 200 enquanto o processo está de pé;
+  - `/health/ready` testa PostgreSQL (`ping`) e SQS (`GetQueueAttributes` na fila de
+    entrada), 2 s cada, em paralelo. A resposta pública diz só `ok`/`unavailable` por
+    check, e o erro vai para o log;
+  - durante o drain a readiness responde 503 sem testar nada;
+  - os dois endpoints existem na porta pública e na admin. O healthcheck do container
+    (`wallet healthcheck`) usa a admin, que existe mesmo com o componente `http` desligado.
 
 ## Limitações, interpretações e trabalho pendente
 
