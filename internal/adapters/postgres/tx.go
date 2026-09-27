@@ -8,9 +8,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/postgres/database"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
 )
 
 var _ app.TxRunner = (*TxRunner)(nil)
@@ -21,6 +23,7 @@ type TxRunner struct {
 	backoff   time.Duration
 	readWrite pgx.TxOptions
 	snapshot  pgx.TxOptions
+	retries   *prometheus.CounterVec
 }
 
 func NewTxRunner(pool *pgxpool.Pool, cfg Config) *TxRunner {
@@ -35,6 +38,15 @@ func NewTxRunner(pool *pgxpool.Pool, cfg Config) *TxRunner {
 	}
 }
 
+func (r *TxRunner) Instrument(reg prometheus.Registerer) error {
+	r.retries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metrics.Namespace,
+		Name:      "db_transaction_retries_total",
+		Help:      "Transactions rerun after a concurrency conflict, by reason: serialization, deadlock, lock_timeout or conflict.",
+	}, []string{"reason"})
+	return reg.Register(r.retries)
+}
+
 func (r *TxRunner) InTx(ctx context.Context, fn func(context.Context, app.Store) error) error {
 	return r.run(ctx, r.readWrite, fn)
 }
@@ -46,11 +58,15 @@ func (r *TxRunner) InReadOnlySnapshot(ctx context.Context, fn func(context.Conte
 func (r *TxRunner) run(ctx context.Context, opts pgx.TxOptions, fn func(context.Context, app.Store) error) error {
 	for attempt := 1; ; attempt++ {
 		err := r.once(ctx, opts, fn)
-		if err == nil || attempt >= r.attempts || !retryable(err) {
+		reason := retryReason(err)
+		if err == nil || attempt >= r.attempts || reason == "" {
 			return err
 		}
 		if sleep(ctx, r.delay(attempt)) != nil {
 			return err
+		}
+		if r.retries != nil {
+			r.retries.WithLabelValues(reason).Inc()
 		}
 	}
 }

@@ -246,9 +246,15 @@ sentinels de `app` e do domínio. O erro original continua acessível por `error
 - Erro de domínio: `23505` em `wallets_player_currency_key` vira `WALLET_ALREADY_EXISTS`, e
   a resposta traz o id da carteira existente.
 - Permanentes (`app.ErrPermanent`): qualquer outra violação de integridade (`CHECK`, FK,
-  triggers), estado gravado corrompido (um `Rehydrate` que falha) ou retries transitórios
-  esgotados no resolver. A transação vai para `FAILED` com `PROCESSING_FAILED`, para
-  auditoria.
+  triggers) ou estado gravado corrompido (um `Rehydrate` que falha).
+  - No caminho síncrono, a transação SQL inteira é desfeita: o HTTP responde 500 e o
+    consumer manda a mensagem para a DLQ com `PROCESSING_FAILED`. Nada fica gravado.
+  - Só o resolver grava `FAILED` (`PROCESSING_FAILED`), para auditoria, depois de erros
+    permanentes repetidos numa transação `PENDING_REFERENCE` já gravada (ver *Referências
+    pendentes*).
+- `InTx` repete na hora, até `DB_TX_ATTEMPTS` vezes, os conflitos `40001`, `40P01`, `55P03`
+  e os conflitos repetíveis. Os demais transitórios voltam para quem chamou: 503 no HTTP,
+  visibilidade adiada no SQS, próximo ciclo nos workers.
 - Rejeição de negócio não é falha: a transação termina em `REJECTED` com um `failureCode`.
 
 ## Referências pendentes
@@ -539,7 +545,10 @@ serviço. O serviço não guarda senhas nem emite tokens.
   - `provider-a` e `provider-b` têm o papel `wager-provider` e uma claim fixa
     `provider_id`, igual ao id do client;
   - `wallet-backoffice` tem o papel `wallet-operator`;
-  - os três recebem a audiência `wagering-api` por um mapper.
+  - os três recebem a audiência `wagering-api` por um mapper;
+  - três clients existem só para os testes de autenticação: `provider-a-shortlived` (tokens
+    de 5 s, para o caso de token expirado), `no-role-client` (audiência e `provider_id`, sem
+    papel) e `no-audience-client` (papel e `provider_id`, sem audiência).
 - Os segredos dos clients ficam só no `.env` (`PROVIDER_A_SECRET`, …), como as senhas do
   banco. O arquivo do realm usa placeholders `${VAR}`, que o Keycloak resolve na importação,
   e o compose repassa as variáveis. `.env.example` traz valores de desenvolvimento local.
@@ -570,7 +579,7 @@ Respostas de autenticação (`application/problem+json`):
 | Sem `Authorization: Bearer …` | 401 | `WWW-Authenticate: Bearer realm="wagering"`, `code: UNAUTHENTICATED` |
 | Token inválido, expirado, de outro issuer ou audiência, assinatura errada | 401 | igual, mais `error="invalid_token"` |
 | Chaves do IdP inacessíveis | 503 | `Retry-After`, `code: TEMPORARILY_UNAVAILABLE`, `retryable: true` |
-| Token válido sem permissão para a operação | 403 | `code: FORBIDDEN` (fase 9) |
+| Token válido sem permissão para a operação | 403 | `code: FORBIDDEN` |
 
 ## Modelo de permissões
 
@@ -743,14 +752,26 @@ Sequência:
   - Chaves com `authorization`, `password`, `secret`, `token` ou `cookie` são mascaradas, e
     a URL do banco aparece sem a senha.
   - Payloads financeiros completos não são logados.
-- Métricas Prometheus em `ADMIN_ADDR` (`/metrics`), num registry próprio:
-  - runtime Go e processo;
-  - `wallet_http_requests_total{method,route,status}` e
-    `wallet_http_request_duration_seconds{method,route}`. `route` é o padrão da rota
-    (`GET /wallets/{walletId}`), não a URL, então a cardinalidade fica limitada;
-  - `wallet_reconciliation_divergences_total`.
+- Métricas Prometheus em `ADMIN_ADDR` (`/metrics`), num registry próprio, além do runtime Go
+  e do processo. Todos os labels têm valores limitados; `route` é o padrão da rota
+  (`GET /wallets/{walletId}`), não a URL.
 
-  As métricas do resolver, do publisher da outbox e do consumer estão nas seções de cada um.
+| Métrica | Tipo e labels | Para quê |
+|---|---|---|
+| `wallet_http_requests_total` | counter `{method,route,status}` | Resultados por status no HTTP |
+| `wallet_http_request_duration_seconds` | histograma `{method,route}` | Latência do HTTP |
+| `wallet_auth_failures_total` | counter `{reason=missing\|invalid\|unavailable}` | Falhas de autenticação |
+| `wallet_consumer_messages_total` | counter `{outcome}` | Resultados por status no SQS, duplicatas (`duplicate`), replays, retries (`retried`) e DLQ (`dead_lettered`) |
+| `wallet_consumer_dead_letters_total` | counter `{reason}` | Mensagens na DLQ por motivo |
+| `wallet_consumer_processing_seconds` | histograma | Latência de processamento de uma mensagem |
+| `wallet_consumer_paused` | gauge | Consumer parado porque o banco não responde |
+| `wallet_db_transaction_retries_total` | counter `{reason=serialization\|deadlock\|lock_timeout\|conflict}` | Conflitos de concorrência que fizeram `InTx` repetir a transação |
+| `wallet_outbox_publish_results_total` | counter `{result=published\|failed\|lost}` | Publicações, falhas com backoff e claims perdidos para outra instância |
+| `wallet_outbox_publish_attempts` | histograma | Tentativas até publicar |
+| `wallet_outbox_pending` | gauge | Eventos ainda não publicados |
+| `wallet_outbox_oldest_pending_age_seconds` | gauge | Atraso da outbox |
+| `wallet_resolver_outcomes_total` | counter `{outcome}` | Resultado de cada tentativa de resolver uma referência pendente |
+| `wallet_reconciliation_divergences_total` | counter | Divergências de reconciliação |
 - Health checks:
   - `/health/live` responde 200 enquanto o processo está de pé;
   - `/health/ready` testa PostgreSQL (`ping`) e SQS (`GetQueueAttributes` na fila de

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/fx"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
@@ -17,7 +18,7 @@ var Module = fx.Module("postgres",
 	fx.Provide(
 		configFrom,
 		func(cfg Config) (*pgxpool.Pool, error) { return NewPool(context.Background(), cfg) },
-		fx.Annotate(NewTxRunner, fx.As(new(app.TxRunner))),
+		fx.Annotate(instrumentedTxRunner, fx.As(new(app.TxRunner))),
 		fx.Annotate(check, fx.ResultTags(`group:"health.checks"`)),
 	),
 	fx.Invoke(func(lc fx.Lifecycle, pool *pgxpool.Pool, log *slog.Logger) {
@@ -43,6 +44,11 @@ func configFrom(cfg config.Config) Config {
 		TxAttempts:       cfg.Database.TxAttempts,
 		TxBackoff:        cfg.Database.TxBackoff,
 	}
+}
+
+func instrumentedTxRunner(pool *pgxpool.Pool, cfg Config, reg prometheus.Registerer) (*TxRunner, error) {
+	r := NewTxRunner(pool, cfg)
+	return r, r.Instrument(reg)
 }
 
 func check(pool *pgxpool.Pool) health.Check {

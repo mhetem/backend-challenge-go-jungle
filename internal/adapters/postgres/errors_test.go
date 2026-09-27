@@ -68,10 +68,31 @@ func TestClassify(t *testing.T) {
 					t.Fatalf("classify(%v) = %v; also matches %v", tt.err, got, other)
 				}
 			}
-			if retryable(got) != tt.retryable {
-				t.Fatalf("retryable(%v) = %v; want %v", got, !tt.retryable, tt.retryable)
+			if retryable := retryReason(got) != ""; retryable != tt.retryable {
+				t.Fatalf("retryable(%v) = %v; want %v", got, retryable, tt.retryable)
 			}
 		})
+	}
+}
+
+func TestRetryReason(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{classify(pgError("40001", "")), "serialization"},
+		{classify(pgError("40P01", "")), "deadlock"},
+		{classify(pgError("55P03", "")), "lock_timeout"},
+		{classify(pgError("23505", "wager_transactions_idempotency_key")), "conflict"},
+		{app.ErrConcurrentUpdate, "conflict"},
+		{classify(pgError("57014", "")), ""},
+		{classify(pgError("23514", "wallets_balance_non_negative")), ""},
+		{nil, ""},
+	}
+	for _, tt := range tests {
+		if got := retryReason(tt.err); got != tt.want {
+			t.Errorf("retryReason(%v) = %q; want %q", tt.err, got, tt.want)
+		}
 	}
 }
 
@@ -83,7 +104,7 @@ func TestClassifyKeepsNil(t *testing.T) {
 
 func TestConcurrentUpdateIsRetryable(t *testing.T) {
 	err := fmt.Errorf("%w: wallet is not at version 1", app.ErrConcurrentUpdate)
-	if !retryable(err) || !errors.Is(err, app.ErrRetryableConflict) {
-		t.Fatalf("retryable(%v) = false", err)
+	if retryReason(err) != "conflict" || !errors.Is(err, app.ErrRetryableConflict) {
+		t.Fatalf("retryReason(%v) = %q; want conflict", err, retryReason(err))
 	}
 }

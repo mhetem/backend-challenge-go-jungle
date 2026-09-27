@@ -71,15 +71,22 @@ func transientCode(code string) bool {
 	return strings.HasPrefix(code, "08") || strings.HasPrefix(code, "53") || strings.HasPrefix(code, "57P0")
 }
 
-func retryable(err error) bool {
+func retryReason(err error) string {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
-		case serializationFailure, deadlockDetected, lockNotAvailable:
-			return true
+		case serializationFailure:
+			return "serialization"
+		case deadlockDetected:
+			return "deadlock"
+		case lockNotAvailable:
+			return "lock_timeout"
 		}
 	}
-	return errors.Is(err, app.ErrRetryableConflict)
+	if errors.Is(err, app.ErrRetryableConflict) {
+		return "conflict"
+	}
+	return ""
 }
 
 func lookup(err, notFound error) error {

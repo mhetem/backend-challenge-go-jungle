@@ -36,6 +36,7 @@ x-app: &app
 services:
   postgres:
     image: postgres:17-alpine
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -87,6 +88,11 @@ services:
     image: ministackorg/ministack:1.5.17
     ports:
       - "4566:4566"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   aws-init:
     image: amazon/aws-cli:2.37.4
