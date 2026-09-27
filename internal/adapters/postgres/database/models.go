@@ -33,6 +33,16 @@ type LedgerEntry struct {
 	CreatedAt          time.Time
 }
 
+type LedgerPosting struct {
+	WalletID      uuid.UUID
+	TransactionID uuid.UUID
+	Account       string
+	Direction     string
+	AmountMinor   int64
+	Currency      string
+	CreatedAt     time.Time
+}
+
 type OutboxEvent struct {
 	ID            uuid.UUID
 	Seq           *int64

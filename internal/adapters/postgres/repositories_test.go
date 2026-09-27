@@ -359,8 +359,34 @@ func TestLedgerPage(t *testing.T) {
 	requireEqual(t, second, want[3:])
 	requireEqual(t, rest, []ledger.Entry{})
 	requireEqual(t, unknown, []ledger.Entry{})
-	requireEqual(t, summary, app.LedgerSummary{Entries: 4, FirstVersion: 1, LastVersion: 4, Net: brl(t, 4000)})
-	requireEqual(t, empty, app.LedgerSummary{Net: brl(t, 0)})
+	requireEqual(t, summary, app.LedgerSummary{Entries: 4, FirstVersion: 1, LastVersion: 4, Net: brl(t, 4000), Posted: brl(t, 4000)})
+	requireEqual(t, empty, app.LedgerSummary{Net: brl(t, 0), Posted: brl(t, 0)})
+}
+
+func TestLedgerAndWalletTotals(t *testing.T) {
+	t.Parallel()
+	r := newRunner(t, config(dbtest.New(t).AppURL))
+	opened := openWallet(t, r, 10000)
+	openWallet(t, r, 0)
+	submit(t, r, payload(t, opened.Wallet, wager.Bet, "bet-1", 2500), t0.Add(time.Minute))
+	submit(t, r, payload(t, opened.Wallet, wager.Win, "win-1", 1000), t0.Add(2*time.Minute))
+
+	var accounts []ledger.AccountTotals
+	var wallets []app.WalletTotals
+	must(t, r.InTx(t.Context(), func(ctx context.Context, s app.Store) error {
+		var err error
+		if accounts, err = s.Ledger().Totals(ctx); err != nil {
+			return err
+		}
+		wallets, err = s.Wallets().Totals(ctx)
+		return err
+	}))
+	requireEqual(t, accounts, []ledger.AccountTotals{
+		{Account: ledger.Funding, Postings: 1, Debits: brl(t, 10000), Credits: brl(t, 0)},
+		{Account: ledger.GamingRevenue, Postings: 2, Debits: brl(t, 1000), Credits: brl(t, 2500)},
+		{Account: ledger.PlayerBalances, Postings: 3, Debits: brl(t, 2500), Credits: brl(t, 11000)},
+	})
+	requireEqual(t, wallets, []app.WalletTotals{{Wallets: 2, Balance: brl(t, 8500)}})
 }
 
 func TestOutboxInsert(t *testing.T) {

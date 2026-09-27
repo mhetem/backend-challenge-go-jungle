@@ -244,8 +244,18 @@ func TestWagerFlow(t *testing.T) {
 		t.Fatalf("ledger = %s", ledger.raw)
 	}
 	recon := s.expect(s.do(http.MethodPost, "/wallets/"+walletID+"/reconciliation", "wallet-backoffice", nil, nil), http.StatusOK, "")
-	if recon.body["consistent"] != true || recon.body["checkedEntries"] != float64(3) || recon.money("difference") != "0.00 BRL" {
+	if recon.body["consistent"] != true || recon.body["checkedEntries"] != float64(3) || recon.money("difference") != "0.00 BRL" ||
+		recon.money("postedBalance") != "85.00 BRL" {
 		t.Fatalf("reconciliation = %s", recon.raw)
+	}
+	books := s.expect(s.do(http.MethodGet, "/ledger/trial-balance", "wallet-backoffice", nil, nil), http.StatusOK, "")
+	var brlBooks response
+	if currencies, _ := books.body["currencies"].([]any); len(currencies) == 1 {
+		brlBooks.body, _ = currencies[0].(map[string]any)
+	}
+	if brlBooks.body["currency"] != "BRL" || brlBooks.body["balanced"] != true || brlBooks.body["consistent"] != true ||
+		brlBooks.money("debits") != brlBooks.money("credits") || brlBooks.money("walletBalances") != "85.00 BRL" {
+		t.Fatalf("trial balance = %s; want only BRL books, balanced and tied to the 85.00 in the wallet", books.raw)
 	}
 
 	again := s.expect(s.do(http.MethodPost, "/wallets", "wallet-backoffice", nil, map[string]any{
@@ -303,8 +313,8 @@ func TestLedgerPaginationWhileAppending(t *testing.T) {
 }
 
 type footprint struct {
-	transactions, entries, events int
-	balance                       string
+	transactions, entries, postings, events int
+	balance                                 string
 }
 
 func (s *stack) footprint(walletID string) footprint {
@@ -313,7 +323,8 @@ func (s *stack) footprint(walletID string) footprint {
 	err := s.db.App.QueryRow(s.t.Context(), `SELECT
 		(SELECT count(*) FROM wager_transactions),
 		(SELECT count(*) FROM ledger_entries),
-		(SELECT count(*) FROM outbox_events)`).Scan(&f.transactions, &f.entries, &f.events)
+		(SELECT count(*) FROM ledger_postings),
+		(SELECT count(*) FROM outbox_events)`).Scan(&f.transactions, &f.entries, &f.postings, &f.events)
 	if err != nil {
 		s.t.Fatal(err)
 	}
@@ -368,6 +379,9 @@ func TestProvidersAreIsolated(t *testing.T) {
 		}, http.StatusForbidden, "FORBIDDEN"},
 		{"A reconciles", func() response {
 			return s.do(http.MethodPost, "/wallets/"+walletID+"/reconciliation", "provider-a", nil, nil)
+		}, http.StatusForbidden, "FORBIDDEN"},
+		{"A reads the trial balance", func() response {
+			return s.do(http.MethodGet, "/ledger/trial-balance", "provider-a", nil, nil)
 		}, http.StatusForbidden, "FORBIDDEN"},
 		{"no token", func() response {
 			return s.submit("", bet(walletID, player, "provider-a", "a-bet-4", "BET", "20.00", ""), nil)

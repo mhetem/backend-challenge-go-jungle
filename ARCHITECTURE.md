@@ -67,8 +67,17 @@ de constraint estável, que a aplicação usa para classificar o erro.
   - `amount > 0`, então `LOSS` nunca gera lançamento;
   - chaves estrangeiras compostas obrigam o lançamento a ter a moeda da carteira e a
     carteira, a moeda e o valor da sua transação.
+- Partidas dobradas (ver [Ledger de partidas dobradas](#ledger-de-partidas-dobradas)):
+  - toda movimentação grava um journal em `ledger_postings`, e uma constraint trigger adiada
+    confere no commit que os débitos do journal são iguais aos créditos;
+  - o journal só existe para transação `PROCESSED`. Ele espelha o lançamento da carteira na
+    conta `PLAYER_BALANCES`, contra `FUNDING` na abertura e `GAMING_REVENUE` nas operações
+    externas;
+  - lançamento sem journal e journal sem lançamento são recusados, e uma chave estrangeira
+    composta obriga cada partida a ter o valor e a moeda da sua transação.
 - Ledger append-only: `UPDATE`, `DELETE` e `TRUNCATE` são revogados do papel da aplicação,
-  e triggers os recusam até para o dono da tabela.
+  e triggers os recusam até para o dono da tabela. Vale para `ledger_entries` e para
+  `ledger_postings`.
 - Sem movimentação duplicada:
   - `UNIQUE (wallet_id, transaction_id)` no ledger;
   - `UNIQUE (provider_id, idempotency_key)` e `UNIQUE (provider_id,
@@ -95,7 +104,7 @@ de constraint estável, que a aplicação usa para classificar o erro.
   todos a mesma `pgx.Tx`. Se `fn` retornar `nil`, o runner faz o commit; qualquer erro faz
   rollback.
 - O `Store` é o único acesso ao banco dentro da transação. Por isso "tudo no mesmo commit"
-  aparece na própria chamada: carteira, transação, lançamento, outbox e inbox.
+  aparece na própria chamada: carteira, transação, lançamento, journal, outbox e inbox.
 - Toda transação define `lock_timeout` e `statement_timeout` com `SET LOCAL`, no mesmo round
   trip do `BEGIN`. Nada vaza para o próximo uso da conexão.
   `idle_in_transaction_session_timeout` fica configurado no papel `wallet_app`.
@@ -197,10 +206,81 @@ Decisão ao receber uma operação, já com o lock da carteira:
 - A versão também é conferida: os lançamentos têm de formar uma sequência contínua que
   termina na versão da carteira. A sequência começa na versão 1 (abertura com saldo) ou 2
   (abertura com zero). Sem lançamentos, a carteira tem de estar na versão 1.
+- O saldo também é reconstruído pelo razão geral: `postedBalance` soma as partidas da
+  carteira na conta `PLAYER_BALANCES` do
+  [ledger de partidas dobradas](#ledger-de-partidas-dobradas).
 - `difference = storedBalance − calculatedBalance`. O resultado só é `consistent` quando a
-  diferença é zero e as versões são contínuas.
+  diferença é zero, as versões são contínuas e `postedBalance` é igual ao saldo armazenado.
 - Uma divergência é registrada em log `WARN`, com os saldos, a diferença e as versões, e
   incrementa uma métrica.
+
+## Ledger de partidas dobradas
+
+O ledger da carteira (`ledger_entries`) é o razão auxiliar de cada jogador: um lançamento por
+movimentação, com saldo anterior e posterior. Acima dele, `ledger_postings` é o razão geral
+em partidas dobradas: cada movimentação vira um journal com uma partida a débito e outra a
+crédito, de mesmo valor.
+
+O plano de contas é fixo, e cada moeda tem os próprios saldos:
+
+| Conta | Natureza | Saldo normal | Representa |
+|---|---|---|---|
+| `FUNDING` | ativo | débito | dinheiro que entrou nas carteiras pelas aberturas |
+| `PLAYER_BALANCES` | passivo | crédito | o que a operação deve aos jogadores, ou seja, a soma das carteiras |
+| `GAMING_REVENUE` | receita | crédito | resultado da casa: apostas menos prêmios e devoluções |
+
+`PLAYER_BALANCES` é uma conta de controle. Cada partida nela leva o `wallet_id`, e o saldo
+de uma carteira nessa conta é o saldo da carteira.
+
+| Operação | Débito | Crédito |
+|---|---|---|
+| `OPENING` | `FUNDING` | `PLAYER_BALANCES` |
+| `BET` | `PLAYER_BALANCES` | `GAMING_REVENUE` |
+| `WIN`, `REFUND` e `ROLLBACK` de `BET` | `GAMING_REVENUE` | `PLAYER_BALANCES` |
+| `ROLLBACK` de `WIN` ou de `REFUND` | `PLAYER_BALANCES` | `GAMING_REVENUE` |
+
+`LOSS` e rejeições não movimentam dinheiro, então não geram journal.
+
+- Domínio:
+  - `ledger.Transfer` monta o journal a partir do lançamento da carteira: a partida do
+    jogador vai na mesma direção do lançamento, e a contrapartida na direção oposta;
+  - `ledger.NewJournal` valida qualquer journal: pelo menos duas partidas, todas da mesma
+    transação e carteira, contas distintas do plano, uma única moeda e débitos iguais a
+    créditos, com overflow tratado;
+  - as regras de wager escolhem a contrapartida pelo tipo, e o `Outcome` (ou o `Opened`, na
+    abertura) leva o journal junto com o lançamento.
+- Persistência:
+  - o caso de uso grava o journal na mesma transação SQL do lançamento e do saldo;
+  - a chave primária `(wallet_id, transaction_id, account)` permite uma partida por conta
+    em cada journal;
+  - a FK composta para `wager_transactions (id, wallet_id, currency, amount_minor)` obriga
+    cada partida a ter o valor e a moeda da transação.
+- A constraint trigger adiada `ledger_journal_check` dispara para cada partida e para cada
+  lançamento da carteira. No commit, ela exige:
+  - `ledger_journal_processed`: a transação está `PROCESSED`;
+  - `ledger_journal_balanced`: os débitos do journal são iguais aos créditos, e maiores
+    que zero;
+  - `ledger_journal_accounts`: a partida em `PLAYER_BALANCES` tem a direção do lançamento da
+    carteira, e a contrapartida é `FUNDING` na abertura e `GAMING_REVENUE` nas operações
+    externas.
+
+  Como toda partida tem o valor da transação e cada conta aparece uma vez, um journal
+  equilibrado tem exatamente duas partidas. São recusados no commit: lançamento sem
+  journal, journal sem lançamento e partida solta.
+- Sem hot row: as contas da casa não têm uma linha de saldo atualizada a cada operação, o
+  que seria um lock global. O saldo de uma conta é a soma das suas partidas, que só são
+  inseridas, e cada operação continua travando apenas a própria carteira.
+- A migration `00012` cria o journal de todos os lançamentos existentes antes de criar as
+  triggers. Um banco com dados anteriores a ela continua consistente.
+- Balancete: `GET /ledger/trial-balance` (só `wallet-operator`) lê tudo num único snapshot
+  `REPEATABLE READ READ ONLY` e responde por moeda:
+  - débitos, créditos e saldo de cada conta, no lado do saldo normal;
+  - o total de débitos e de créditos, e `balanced` quando eles são iguais;
+  - o saldo de `PLAYER_BALANCES` comparado com a soma das carteiras, e `consistent` quando
+    as duas conferem e as partidas estão equilibradas.
+
+  Com as partidas equilibradas, `FUNDING = PLAYER_BALANCES + GAMING_REVENUE`. Uma divergência
+  vai para o log `WARN` e para a mesma métrica da reconciliação.
 
 ## Máquina de estados
 
@@ -604,7 +684,7 @@ A identidade vem só do token. O `providerId` do corpo ou do path é comparado c
 | `POST /wagering/transactions` | `wager-provider` cujo `provider_id` é o `providerId` do corpo | 403, antes de qualquer acesso ao banco |
 | `GET /providers/{providerId}/wagering/transactions/{id}` | o próprio provider, ou `wallet-operator` | 403 |
 | `GET /wagering/transactions/{id}` | `wallet-operator`, ou o provider dono da transação | 404 idêntico ao de inexistente, para não revelar que a transação existe |
-| Carteiras: abrir, ler, ledger, reconciliação | `wallet-operator` | 403 |
+| Carteiras: abrir, ler, ledger, reconciliação; balancete (`GET /ledger/trial-balance`) | `wallet-operator` | 403 |
 
 - Um provider nunca vê transações de outro, nem por replay. A chave de idempotência e o id
   externo valem dentro do provider do token, então repetir a chave de outro provider cria
@@ -620,8 +700,8 @@ A identidade vem só do token. O `providerId` do corpo ou do path é comparado c
 ## Contrato HTTP
 
 Rotas: `POST /wallets`, `GET /wallets/{walletId}`, `GET /wallets/{walletId}/ledger`,
-`POST /wallets/{walletId}/reconciliation`, `POST /wagering/transactions`,
-`GET /wagering/transactions/{transactionId}` e
+`POST /wallets/{walletId}/reconciliation`, `GET /ledger/trial-balance`,
+`POST /wagering/transactions`, `GET /wagering/transactions/{transactionId}` e
 `GET /providers/{providerId}/wagering/transactions/{externalTransactionId}`.
 
 Resultados de `POST /wagering/transactions`. O status vem do estado gravado, seja operação
@@ -804,12 +884,12 @@ Sequência:
 | `wallet_outbox_pending` | gauge | Eventos ainda não publicados |
 | `wallet_outbox_oldest_pending_age_seconds` | gauge | Atraso da outbox |
 | `wallet_resolver_outcomes_total` | counter `{outcome}` | Resultado de cada tentativa de resolver uma referência pendente |
-| `wallet_reconciliation_divergences_total` | counter | Divergências de reconciliação |
+| `wallet_reconciliation_divergences_total` | counter | Divergências de reconciliação e do balancete |
 - Tracing com OpenTelemetry, exportado por OTLP/HTTP ao Jaeger do compose:
   - Spans:
     - HTTP: um span de servidor por requisição, com o nome da rota;
     - casos de uso: `WagerService.Submit`, `.SubmitMessage`, `.Resolve`, `.Fail`,
-      `WalletService.Open` e `.Reconcile`;
+      `WalletService.Open`, `.Reconcile` e `.TrialBalance`;
     - banco: um span por transação (tentativas e cada retry, com o motivo) e um por query,
       com o nome da query do sqlc;
     - consumer: um span por mensagem;
@@ -905,6 +985,11 @@ Suíte e2e (`test/e2e`, tag `e2e`):
 - Um lote que demora mais que a visibilidade pode ter mensagens entregues de novo a outra
   instância enquanto ainda esperam a vez na primeira. A inbox transforma a segunda execução
   em duplicata, e o delete com o receipt handle vencido só gera um aviso no log.
+- Os journals têm sempre duas partidas, porque a FK amarra o valor de cada partida ao da
+  transação. Saldo de bônus, taxas ou partidas divididas exigiriam relaxar essa FK e
+  deixar só a soma para a trigger.
+- O balancete soma todas as partidas a cada chamada. É uma auditoria sob demanda, e o custo
+  cresce com o histórico. Em produção, ele partiria de saldos fechados por período.
 - O cliente HTTP do SDK da AWS não tem timeout próprio. Com o SQS congelado, o publisher fica
   bloqueado em vez de falhar e recuar; quando o lease vence, outra instância assume os mesmos
   eventos, e a deduplicação FIFO descarta o envio repetido. Nada se perde, mas o backoff da
@@ -912,9 +997,6 @@ Suíte e2e (`test/e2e`, tag `e2e`):
 
 ### Trabalho não concluído
 
-- **Diferenciais opcionais do desafio.** O ledger de partidas dobradas não foi
-  implementado. O teste de carga, os dashboards e o tracing, os outros diferenciais, estão
-  no README.
 - **Credenciais do broker por componente.** As policies por papel são provisionadas, mas
   localmente todos os componentes usam a mesma credencial e o MiniStack não aplica IAM.
   Falta rodar cada componente com o seu papel e verificar as policies numa AWS real.
@@ -924,5 +1006,9 @@ Suíte e2e (`test/e2e`, tag `e2e`):
   retenção com um papel próprio, ou particionamento por tempo.
 - **Limite para buscas de JWKS.** Um `kid` desconhecido sempre dispara uma busca. Falta um
   intervalo mínimo entre buscas.
-- **Cauda do teste de carga.** O p99 do open loop variou de 8 a 22 ms entre execuções com a
-  mesma carga, e a causa não foi investigada (ver README).
+- **Cauda do teste de carga.** Em quatro execuções com a mesma carga, o p99 do open loop
+  ficou entre 8 e 10 ms em três e chegou a 22 ms em uma. A causa não foi investigada (ver
+  README).
+- **Custo do tracing e do ledger de partidas dobradas.** Os dois entraram entre duas
+  execuções do teste de carga, e juntos reduziram a vazão máxima local em 29%. Falta medir
+  o custo de cada um separadamente.

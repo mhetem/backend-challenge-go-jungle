@@ -53,6 +53,13 @@ func TestOpenWithBalance(t *testing.T) {
 	if opened.Entry == nil || opened.Entry.Snapshot() != wantEntry {
 		t.Fatalf("entry = %+v; want %+v", opened.Entry, wantEntry)
 	}
+	wantJournal := []ledger.Posting{
+		{WalletID: walletID, TransactionID: id, Account: ledger.PlayerBalances, Direction: ledger.Credit, Amount: brl(t, 100000), CreatedAt: t0},
+		{WalletID: walletID, TransactionID: id, Account: ledger.Funding, Direction: ledger.Debit, Amount: brl(t, 100000), CreatedAt: t0},
+	}
+	if got := opened.Journal.Postings(); !reflect.DeepEqual(got, wantJournal) {
+		t.Fatalf("journal = %+v; want %+v", got, wantJournal)
+	}
 	wantEvents := []events.Event{
 		events.NewWagerTransactionProcessed(events.Meta{
 			EventID:       eventID(id, events.TypeWagerTransactionProcessed),
@@ -102,7 +109,7 @@ func TestOpenWithZeroBalance(t *testing.T) {
 	if opened.Wallet == nil || opened.Wallet.Snapshot() != want {
 		t.Fatalf("wallet = %+v; want %+v", opened.Wallet, want)
 	}
-	if opened.Transaction != nil || opened.Entry != nil || opened.Events != nil {
+	if opened.Transaction != nil || opened.Entry != nil || opened.Journal.Postings() != nil || opened.Events != nil {
 		t.Fatalf("zero opening produced %+v", opened)
 	}
 }

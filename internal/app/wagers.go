@@ -165,6 +165,9 @@ func record(ctx context.Context, st Store, w *wallet.Wallet, expectedVersion int
 		if err := st.Ledger().Insert(ctx, *out.Entry); err != nil {
 			return err
 		}
+		if err := st.Ledger().Post(ctx, out.Journal); err != nil {
+			return err
+		}
 		if err := st.Wallets().Update(ctx, w, expectedVersion); err != nil {
 			return err
 		}

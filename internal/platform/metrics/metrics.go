@@ -44,7 +44,7 @@ func NewApp(reg prometheus.Registerer) (*App, error) {
 		reconciliationDivergences: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "reconciliation_divergences_total",
-			Help:      "Reconciliations that found a stored balance or version chain diverging from the ledger.",
+			Help:      "Reconciliations and trial balances that found stored balances, the version chain or the double-entry journal diverging from the ledger.",
 		}),
 	}
 	if err := reg.Register(m.reconciliationDivergences); err != nil {

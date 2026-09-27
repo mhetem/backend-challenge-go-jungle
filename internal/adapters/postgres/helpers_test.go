@@ -97,6 +97,9 @@ func openWallet(t *testing.T, r *postgres.TxRunner, minor int64) wager.Opened {
 		if err := s.Ledger().Insert(ctx, *opened.Entry); err != nil {
 			return err
 		}
+		if err := s.Ledger().Post(ctx, opened.Journal); err != nil {
+			return err
+		}
 		return s.Outbox().Insert(ctx, opened.Events...)
 	}))
 	return opened
@@ -154,6 +157,9 @@ func submit(t *testing.T, r *postgres.TxRunner, p wager.Payload, now time.Time) 
 func persist(ctx context.Context, s app.Store, w *wallet.Wallet, version int64, out wager.Outcome) error {
 	if out.Entry != nil {
 		if err := s.Ledger().Insert(ctx, *out.Entry); err != nil {
+			return err
+		}
+		if err := s.Ledger().Post(ctx, out.Journal); err != nil {
 			return err
 		}
 		if err := s.Wallets().Update(ctx, w, version); err != nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/ledger"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/money"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wager"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wallet"
 )
@@ -37,8 +38,8 @@ func TestOpenWallet(t *testing.T) {
 	if _, err := h.wagers.Get(ctx, wallet.OpeningTransactionID(empty.ID)); !errors.Is(err, domain.ErrTransactionNotFound) {
 		t.Fatalf("zero opening transaction: err = %v; want %v", err, domain.ErrTransactionNotFound)
 	}
-	if entries, events := h.entries(t, empty.ID), h.eventTypes(t, empty.ID); len(entries) != 0 || len(events) != 0 {
-		t.Fatalf("zero opening wrote %d ledger entries and events %v; want none", len(entries), events)
+	if entries, postings, events := h.entries(t, empty.ID), h.postings(t, empty.ID), h.eventTypes(t, empty.ID); len(entries) != 0 || len(postings) != 0 || len(events) != 0 {
+		t.Fatalf("zero opening wrote %d ledger entries, postings %v and events %v; want none", len(entries), postings, events)
 	}
 
 	funded := h.open(t, "100.00")
@@ -59,6 +60,7 @@ func TestOpenWallet(t *testing.T) {
 		WalletVersion: 1,
 		CreatedAt:     t0,
 	}})
+	requireEqual(t, h.postings(t, funded.ID), map[string]int{"FUNDING DEBIT": 1, "PLAYER_BALANCES CREDIT": 1})
 	requireEqual(t, h.eventTypes(t, funded.ID), []string{"WagerTransactionProcessed", "WalletBalanceChanged"})
 
 	_, err = h.wallets.Open(ctx, openCommand(t, player, "50.00", "BRL"))
@@ -137,6 +139,7 @@ func TestReconcile(t *testing.T) {
 		WalletID:           funded.ID,
 		StoredBalance:      brl(t, "80.00"),
 		CalculatedBalance:  brl(t, "80.00"),
+		PostedBalance:      brl(t, "80.00"),
 		Difference:         brl(t, "0.00"),
 		CheckedEntries:     3,
 		ContinuousVersions: true,
@@ -164,6 +167,7 @@ func TestReconcile(t *testing.T) {
 		WalletID:           funded.ID,
 		StoredBalance:      brl(t, "85.00"),
 		CalculatedBalance:  brl(t, "80.00"),
+		PostedBalance:      brl(t, "80.00"),
 		Difference:         brl(t, "5.00"),
 		CheckedEntries:     3,
 		ContinuousVersions: true,
@@ -180,5 +184,84 @@ func TestReconcile(t *testing.T) {
 	}
 	if got, entries := h.balance(t, funded.ID), len(h.entries(t, funded.ID)); got != "85.00" || entries != 3 {
 		t.Fatalf("after reconciling: balance %s over %d entries; want it untouched at 85.00 over 3", got, entries)
+	}
+}
+
+func TestTrialBalance(t *testing.T) {
+	t.Parallel()
+	h := setup(t)
+	ctx := t.Context()
+	a, b := h.open(t, "100.00"), h.open(t, "0.00")
+	_, err := h.wallets.Open(ctx, openCommand(t, uuid.New(), "5.00", "USD"))
+	must(t, err)
+	for _, r := range []app.WagerRequest{
+		request(a, wager.Bet, "bet-1", "30.00", ""),
+		request(a, wager.Win, "win-1", "10.00", ""),
+		request(a, wager.Refund, "refund-1", "30.00", "bet-1"),
+		request(a, wager.Rollback, "rollback-1", "10.00", "win-1"),
+		request(a, wager.Loss, "loss-1", "0.00", ""),
+		request(b, wager.Win, "win-2", "10.00", ""),
+		request(b, wager.Bet, "bet-2", "500.00", ""),
+	} {
+		h.submit(t, r)
+	}
+	usd := func(amount string) money.Money {
+		m, err := money.ParseSigned(amount, "USD")
+		must(t, err)
+		return m
+	}
+	want := []app.TrialBalance{
+		{
+			Ledger: ledger.TrialBalance{
+				Currency: money.BRL,
+				Accounts: []ledger.AccountTotals{
+					{Account: ledger.Funding, Postings: 1, Debits: brl(t, "100.00"), Credits: brl(t, "0.00"), Balance: brl(t, "100.00")},
+					{Account: ledger.PlayerBalances, Postings: 6, Debits: brl(t, "40.00"), Credits: brl(t, "150.00"), Balance: brl(t, "110.00")},
+					{Account: ledger.GamingRevenue, Postings: 5, Debits: brl(t, "50.00"), Credits: brl(t, "40.00"), Balance: brl(t, "-10.00")},
+				},
+				Debits:  brl(t, "190.00"),
+				Credits: brl(t, "190.00"),
+			},
+			Wallets:        2,
+			WalletBalances: brl(t, "110.00"),
+			Consistent:     true,
+		},
+		{
+			Ledger: ledger.TrialBalance{
+				Currency: money.USD,
+				Accounts: []ledger.AccountTotals{
+					{Account: ledger.Funding, Postings: 1, Debits: usd("5.00"), Credits: usd("0.00"), Balance: usd("5.00")},
+					{Account: ledger.PlayerBalances, Postings: 1, Debits: usd("0.00"), Credits: usd("5.00"), Balance: usd("5.00")},
+					{Account: ledger.GamingRevenue, Debits: usd("0.00"), Credits: usd("0.00"), Balance: usd("0.00")},
+				},
+				Debits:  usd("5.00"),
+				Credits: usd("5.00"),
+			},
+			Wallets:        1,
+			WalletBalances: usd("5.00"),
+			Consistent:     true,
+		},
+	}
+	got, err := h.wallets.TrialBalance(ctx)
+	must(t, err)
+	requireEqual(t, got, want)
+	if n := h.metrics.diverged.Load(); n != 0 || h.logs.Len() != 0 {
+		t.Fatalf("consistent books reported %d divergences and logged %q", n, h.logs.String())
+	}
+
+	admin := h.db.Admin(t)
+	_, err = admin.Exec(ctx, `SET session_replication_role = replica`)
+	must(t, err)
+	_, err = admin.Exec(ctx, `UPDATE wallets SET balance_minor = balance_minor + 500 WHERE id = $1`, b.ID)
+	must(t, err)
+
+	got, err = h.wallets.TrialBalance(ctx)
+	must(t, err)
+	brlBooks := got[0]
+	if brlBooks.Consistent || !brlBooks.Ledger.Balanced() || brlBooks.WalletBalances != brl(t, "115.00") || !got[1].Consistent {
+		t.Fatalf("books after a stored balance drifted = %+v; want balanced BRL books that no longer match 115.00 in wallets", got)
+	}
+	if n := h.metrics.diverged.Load(); n != 1 || !strings.Contains(h.logs.String(), `"currency":"BRL"`) {
+		t.Fatalf("%d divergences counted, logs %q; want the BRL books reported once", n, h.logs.String())
 	}
 }

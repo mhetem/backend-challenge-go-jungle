@@ -57,6 +57,13 @@ func TestTwoBetsRaceForTheSameFunds(t *testing.T) {
 	if got := h.balance(t, w.ID); got != "20.00" {
 		t.Fatalf("balance after resending = %s; want 20.00", got)
 	}
+	requireEqual(t, h.postings(t, w.ID), map[string]int{
+		"FUNDING DEBIT":          1,
+		"PLAYER_BALANCES CREDIT": 1,
+		"PLAYER_BALANCES DEBIT":  1,
+		"GAMING_REVENUE CREDIT":  1,
+	})
+	h.requireConsistentBooks(t)
 }
 
 func TestSameBetFiftyTimes(t *testing.T) {
@@ -85,6 +92,10 @@ func TestSameBetFiftyTimes(t *testing.T) {
 	if n := debits(h.entries(t, w.ID)); n != 1 {
 		t.Fatalf("%d debits; want 1", n)
 	}
+	if n := h.postings(t, w.ID)["PLAYER_BALANCES DEBIT"]; n != 1 {
+		t.Fatalf("%d player debits in the journal; want 1", n)
+	}
+	h.requireConsistentBooks(t)
 }
 
 func TestDistinctWalletsProceedInParallel(t *testing.T) {
@@ -122,4 +133,5 @@ func TestDistinctWalletsProceedInParallel(t *testing.T) {
 	if got := h.balance(t, a.ID); got != "90.00" {
 		t.Fatalf("wallet A balance = %s; want 90.00 once the lock was released", got)
 	}
+	h.requireConsistentBooks(t)
 }

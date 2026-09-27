@@ -35,6 +35,25 @@ func (r ledgerEntries) Insert(ctx context.Context, e ledger.Entry) error {
 	}))
 }
 
+func (r ledgerEntries) Post(ctx context.Context, j ledger.Journal) error {
+	for _, p := range j.Postings() {
+		cur, _ := p.Amount.Currency()
+		amount, _ := p.Amount.Minor()
+		if err := r.q.InsertLedgerPosting(ctx, database.InsertLedgerPostingParams{
+			WalletID:      p.WalletID,
+			TransactionID: p.TransactionID,
+			Account:       string(p.Account),
+			Direction:     string(p.Direction),
+			AmountMinor:   amount,
+			Currency:      string(cur),
+			CreatedAt:     p.CreatedAt,
+		}); err != nil {
+			return classify(err)
+		}
+	}
+	return nil
+}
+
 func (r ledgerEntries) Page(ctx context.Context, walletID uuid.UUID, afterVersion int64, limit int) ([]ledger.Entry, error) {
 	rows, err := r.q.ListLedgerEntries(ctx, database.ListLedgerEntriesParams{
 		WalletID:      walletID,
@@ -64,12 +83,46 @@ func (r ledgerEntries) Summarize(ctx context.Context, walletID uuid.UUID, cur mo
 	if err != nil {
 		return app.LedgerSummary{}, corrupt(err)
 	}
+	postings, err := r.q.SummarizeWalletPostings(ctx, walletID)
+	if err != nil {
+		return app.LedgerSummary{}, classify(err)
+	}
+	posted, err := money.ParseSigned(postings.Net, string(cur))
+	if err != nil {
+		return app.LedgerSummary{}, corrupt(err)
+	}
 	return app.LedgerSummary{
 		Entries:      row.Entries,
 		FirstVersion: row.FirstVersion,
 		LastVersion:  row.LastVersion,
 		Net:          net,
+		Posted:       posted,
 	}, nil
+}
+
+func (r ledgerEntries) Totals(ctx context.Context) ([]ledger.AccountTotals, error) {
+	rows, err := r.q.TrialBalance(ctx)
+	if err != nil {
+		return nil, classify(err)
+	}
+	totals := make([]ledger.AccountTotals, 0, len(rows))
+	for _, row := range rows {
+		debits, err := money.Parse(row.Debits, row.Currency)
+		if err != nil {
+			return nil, corrupt(err)
+		}
+		credits, err := money.Parse(row.Credits, row.Currency)
+		if err != nil {
+			return nil, corrupt(err)
+		}
+		totals = append(totals, ledger.AccountTotals{
+			Account:  ledger.Account(row.Account),
+			Postings: row.Postings,
+			Debits:   debits,
+			Credits:  credits,
+		})
+	}
+	return totals, nil
 }
 
 func entryFrom(row database.LedgerEntry) (ledger.Entry, error) {

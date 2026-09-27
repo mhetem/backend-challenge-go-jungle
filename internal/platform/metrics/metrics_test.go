@@ -18,7 +18,7 @@ func TestReconciliationDivergencesAreCounted(t *testing.T) {
 	m.ReconciliationDiverged()
 	m.ReconciliationDiverged()
 	want := `
-# HELP wallet_reconciliation_divergences_total Reconciliations that found a stored balance or version chain diverging from the ledger.
+# HELP wallet_reconciliation_divergences_total Reconciliations and trial balances that found stored balances, the version chain or the double-entry journal diverging from the ledger.
 # TYPE wallet_reconciliation_divergences_total counter
 wallet_reconciliation_divergences_total 2
 `

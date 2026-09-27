@@ -473,7 +473,8 @@ func (c *cluster) transaction(p *process, extID string) response {
 func (c *cluster) reconcile(p *process, w wallet, balance string) {
 	c.t.Helper()
 	r := c.call(p, http.MethodPost, "/wallets/"+w.id+"/reconciliation", "wallet-backoffice", nil, nil, http.StatusOK)
-	if r.body["consistent"] != true || r.body["continuousVersions"] != true || r.money("storedBalance") != balance || r.money("difference") != "0.00" {
+	if r.body["consistent"] != true || r.body["continuousVersions"] != true || r.money("storedBalance") != balance ||
+		r.money("postedBalance") != balance || r.money("difference") != "0.00" {
 		c.t.Fatalf("reconciliation of %s = %s; want consistent at %s", w.id, r.raw, balance)
 	}
 }

@@ -155,9 +155,10 @@ func TestReversalMatrix(t *testing.T) {
 	}
 	r, err := h.wallets.Reconcile(t.Context(), w.ID)
 	must(t, err)
-	if !r.Consistent || r.CalculatedBalance.String() != "125.00" {
+	if !r.Consistent || r.CalculatedBalance.String() != "125.00" || r.PostedBalance.String() != "125.00" {
 		t.Fatalf("reconciliation = %+v; want consistent at 125.00", r)
 	}
+	h.requireConsistentBooks(t)
 }
 
 func TestPendingReferenceIsWokenByItsReference(t *testing.T) {

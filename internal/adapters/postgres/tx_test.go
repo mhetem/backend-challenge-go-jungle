@@ -100,7 +100,10 @@ func TestInTxRollsBackWhenCommitFails(t *testing.T) {
 		if err := s.Transactions().Insert(ctx, bet); err != nil {
 			return err
 		}
-		return s.Ledger().Insert(ctx, *out.Entry)
+		if err := s.Ledger().Insert(ctx, *out.Entry); err != nil {
+			return err
+		}
+		return s.Ledger().Post(ctx, out.Journal)
 	})
 	var pgErr *pgconn.PgError
 	if !errors.Is(err, app.ErrPermanent) || !errors.As(err, &pgErr) || pgErr.ConstraintName != "ledger_entries_wallet_coupling" || attempts != 1 {

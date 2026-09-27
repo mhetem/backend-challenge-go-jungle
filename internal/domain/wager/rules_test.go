@@ -62,6 +62,13 @@ func TestApplyBet(t *testing.T) {
 	if out.Entry == nil || out.Entry.Snapshot() != wantEntry {
 		t.Fatalf("entry = %+v; want %+v", out.Entry, wantEntry)
 	}
+	wantJournal := []ledger.Posting{
+		{WalletID: walletID, TransactionID: tx.ID(), Account: ledger.PlayerBalances, Direction: ledger.Debit, Amount: brl(t, 2500), CreatedAt: t1},
+		{WalletID: walletID, TransactionID: tx.ID(), Account: ledger.GamingRevenue, Direction: ledger.Credit, Amount: brl(t, 2500), CreatedAt: t1},
+	}
+	if got := out.Journal.Postings(); !reflect.DeepEqual(got, wantJournal) {
+		t.Fatalf("journal = %+v; want %+v", got, wantJournal)
+	}
 	s := tx.Snapshot()
 	if s.Status != wager.Processed || *s.Result != (wager.Result{Balance: brl(t, 97500), WalletVersion: 6}) || s.CompletedAt != t1 {
 		t.Fatalf("transaction = %+v", s)
@@ -158,14 +165,19 @@ func TestApplyKinds(t *testing.T) {
 				t.Fatalf("transaction = %s %s; want %s %s", tx.Status(), tx.FailureCode(), tt.status, tt.code)
 			}
 			version, wantTypes := int64(5), rejectedTypes
+			journal := out.Journal.Postings()
 			switch {
 			case tt.dir != "":
 				version, wantTypes = 6, processedTypes
 				if out.Entry == nil || out.Entry.Snapshot().Direction != tt.dir || out.Entry.Snapshot().BalanceAfter != brl(t, tt.after) {
 					t.Fatalf("entry = %+v; want %s leaving %s", out.Entry, tt.dir, brl(t, tt.after))
 				}
-			case out.Entry != nil:
-				t.Fatalf("unexpected entry %+v", out.Entry.Snapshot())
+				if len(journal) != 2 || journal[0].Account != ledger.PlayerBalances || journal[0].Direction != tt.dir ||
+					journal[1].Account != ledger.GamingRevenue || journal[1].Direction != tt.dir.Opposite() || journal[1].Amount != brl(t, tt.minor) {
+					t.Fatalf("journal = %+v; want the player %s mirrored on %s", journal, tt.dir, ledger.GamingRevenue)
+				}
+			case out.Entry != nil, journal != nil:
+				t.Fatalf("unexpected entry %+v or journal %+v", out.Entry, journal)
 			case tt.status == wager.Processed:
 				wantTypes = lossTypes
 			}

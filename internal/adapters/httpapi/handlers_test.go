@@ -48,11 +48,12 @@ func (tokens) Authenticate(_ context.Context, token string) (auth.Principal, err
 }
 
 type fakeWallets struct {
-	calls     int
-	open      func(app.OpenWallet) (wallet.Snapshot, error)
-	get       func(uuid.UUID) (wallet.Snapshot, error)
-	ledger    func(uuid.UUID, string, int) (app.LedgerPage, error)
-	reconcile func(uuid.UUID) (app.Reconciliation, error)
+	calls        int
+	open         func(app.OpenWallet) (wallet.Snapshot, error)
+	get          func(uuid.UUID) (wallet.Snapshot, error)
+	ledger       func(uuid.UUID, string, int) (app.LedgerPage, error)
+	reconcile    func(uuid.UUID) (app.Reconciliation, error)
+	trialBalance func() ([]app.TrialBalance, error)
 }
 
 func (f *fakeWallets) Open(_ context.Context, cmd app.OpenWallet) (wallet.Snapshot, error) {
@@ -73,6 +74,11 @@ func (f *fakeWallets) Ledger(_ context.Context, id uuid.UUID, cursor string, lim
 func (f *fakeWallets) Reconcile(_ context.Context, id uuid.UUID) (app.Reconciliation, error) {
 	f.calls++
 	return f.reconcile(id)
+}
+
+func (f *fakeWallets) TrialBalance(context.Context) ([]app.TrialBalance, error) {
+	f.calls++
+	return f.trialBalance()
 }
 
 type fakeWagers struct {
@@ -432,7 +438,18 @@ func TestWalletRoutes(t *testing.T) {
 			},
 			reconcile: func(uuid.UUID) (app.Reconciliation, error) {
 				return app.Reconciliation{WalletID: walletID, StoredBalance: brl(t, "85.00"), CalculatedBalance: brl(t, "80.00"),
-					Difference: brl(t, "5.00"), CheckedEntries: 3, ContinuousVersions: true}, nil
+					PostedBalance: brl(t, "80.00"), Difference: brl(t, "5.00"), CheckedEntries: 3, ContinuousVersions: true}, nil
+			},
+			trialBalance: func() ([]app.TrialBalance, error) {
+				books, err := ledger.NewTrialBalance(money.BRL, []ledger.AccountTotals{
+					{Account: ledger.GamingRevenue, Postings: 1, Debits: brl(t, "0.00"), Credits: brl(t, "25.00")},
+					{Account: ledger.Funding, Postings: 1, Debits: brl(t, "1000.00"), Credits: brl(t, "0.00")},
+					{Account: ledger.PlayerBalances, Postings: 2, Debits: brl(t, "25.00"), Credits: brl(t, "1000.00")},
+				})
+				if err != nil {
+					return nil, err
+				}
+				return []app.TrialBalance{{Ledger: books, Wallets: 1, WalletBalances: brl(t, "975.00"), Consistent: true}}, nil
 			},
 		}
 	}
@@ -486,6 +503,7 @@ func TestWalletRoutes(t *testing.T) {
 		"walletId":           walletID.String(),
 		"storedBalance":      map[string]any{"amount": "85.00", "currency": "BRL"},
 		"calculatedBalance":  map[string]any{"amount": "80.00", "currency": "BRL"},
+		"postedBalance":      map[string]any{"amount": "80.00", "currency": "BRL"},
 		"difference":         map[string]any{"amount": "5.00", "currency": "BRL"},
 		"consistent":         false,
 		"continuousVersions": true,
@@ -495,12 +513,36 @@ func TestWalletRoutes(t *testing.T) {
 		t.Fatalf("reconciliation = %d %s", r.status, r.raw)
 	}
 
+	r = serve(t, wallets(), &fakeWagers{}, call{method: http.MethodGet, path: "/ledger/trial-balance", token: "operator"})
+	m := func(amount string) map[string]any { return map[string]any{"amount": amount, "currency": "BRL"} }
+	books := map[string]any{
+		"currency": "BRL",
+		"accounts": []any{
+			map[string]any{"account": "FUNDING", "normalBalance": "DEBIT", "postings": float64(1),
+				"debits": m("1000.00"), "credits": m("0.00"), "balance": m("1000.00")},
+			map[string]any{"account": "PLAYER_BALANCES", "normalBalance": "CREDIT", "postings": float64(2),
+				"debits": m("25.00"), "credits": m("1000.00"), "balance": m("975.00")},
+			map[string]any{"account": "GAMING_REVENUE", "normalBalance": "CREDIT", "postings": float64(1),
+				"debits": m("0.00"), "credits": m("25.00"), "balance": m("25.00")},
+		},
+		"debits":         m("1025.00"),
+		"credits":        m("1025.00"),
+		"balanced":       true,
+		"wallets":        float64(1),
+		"walletBalances": m("975.00"),
+		"consistent":     true,
+	}
+	if r.status != http.StatusOK || !reflect.DeepEqual(r.body, map[string]any{"currencies": []any{books}}) {
+		t.Fatalf("trial balance = %d %s", r.status, r.raw)
+	}
+
 	for _, token := range []string{"provider-a", "no-role"} {
 		for _, c := range []call{
 			{method: http.MethodPost, path: "/wallets", token: token, body: openBody(playerID)},
 			{method: http.MethodGet, path: path, token: token},
 			{method: http.MethodGet, path: path + "/ledger", token: token},
 			{method: http.MethodPost, path: path + "/reconciliation", token: token},
+			{method: http.MethodGet, path: "/ledger/trial-balance", token: token},
 		} {
 			w := wallets()
 			serve(t, w, &fakeWagers{}, c).requireProblem(t, http.StatusForbidden, "FORBIDDEN")

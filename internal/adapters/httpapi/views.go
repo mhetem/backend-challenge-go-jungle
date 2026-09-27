@@ -83,6 +83,7 @@ type reconciliationView struct {
 	WalletID           uuid.UUID   `json:"walletId"`
 	StoredBalance      money.Money `json:"storedBalance"`
 	CalculatedBalance  money.Money `json:"calculatedBalance"`
+	PostedBalance      money.Money `json:"postedBalance"`
 	Difference         money.Money `json:"difference"`
 	Consistent         bool        `json:"consistent"`
 	ContinuousVersions bool        `json:"continuousVersions"`
@@ -94,11 +95,64 @@ func viewReconciliation(r app.Reconciliation) reconciliationView {
 		WalletID:           r.WalletID,
 		StoredBalance:      r.StoredBalance,
 		CalculatedBalance:  r.CalculatedBalance,
+		PostedBalance:      r.PostedBalance,
 		Difference:         r.Difference,
 		Consistent:         r.Consistent,
 		ContinuousVersions: r.ContinuousVersions,
 		CheckedEntries:     r.CheckedEntries,
 	}
+}
+
+type accountView struct {
+	Account       ledger.Account   `json:"account"`
+	NormalBalance ledger.Direction `json:"normalBalance"`
+	Postings      int64            `json:"postings"`
+	Debits        money.Money      `json:"debits"`
+	Credits       money.Money      `json:"credits"`
+	Balance       money.Money      `json:"balance"`
+}
+
+type booksView struct {
+	Currency       money.Currency `json:"currency"`
+	Accounts       []accountView  `json:"accounts"`
+	Debits         money.Money    `json:"debits"`
+	Credits        money.Money    `json:"credits"`
+	Balanced       bool           `json:"balanced"`
+	Wallets        int64          `json:"wallets"`
+	WalletBalances money.Money    `json:"walletBalances"`
+	Consistent     bool           `json:"consistent"`
+}
+
+type trialBalanceView struct {
+	Currencies []booksView `json:"currencies"`
+}
+
+func viewTrialBalance(balances []app.TrialBalance) trialBalanceView {
+	v := trialBalanceView{Currencies: make([]booksView, 0, len(balances))}
+	for _, tb := range balances {
+		books := booksView{
+			Currency:       tb.Ledger.Currency,
+			Accounts:       make([]accountView, 0, len(tb.Ledger.Accounts)),
+			Debits:         tb.Ledger.Debits,
+			Credits:        tb.Ledger.Credits,
+			Balanced:       tb.Ledger.Balanced(),
+			Wallets:        tb.Wallets,
+			WalletBalances: tb.WalletBalances,
+			Consistent:     tb.Consistent,
+		}
+		for _, a := range tb.Ledger.Accounts {
+			books.Accounts = append(books.Accounts, accountView{
+				Account:       a.Account,
+				NormalBalance: a.Account.Normal(),
+				Postings:      a.Postings,
+				Debits:        a.Debits,
+				Credits:       a.Credits,
+				Balance:       a.Balance,
+			})
+		}
+		v.Currencies = append(v.Currencies, books)
+	}
+	return v
 }
 
 type resultView struct {

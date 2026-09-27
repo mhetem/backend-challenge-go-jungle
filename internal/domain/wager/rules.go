@@ -26,8 +26,9 @@ type Reference struct {
 }
 
 type Outcome struct {
-	Entry  *ledger.Entry
-	Events []events.Event
+	Entry   *ledger.Entry
+	Journal ledger.Journal
+	Events  []events.Event
 }
 
 func NewRules(referenceTTL time.Duration, maxAttempts int, backoff func(attempt int) time.Duration) (Rules, error) {
@@ -187,13 +188,20 @@ func move(w *wallet.Wallet, dir ledger.Direction, tx *Transaction, now time.Time
 }
 
 func process(tx *Transaction, w *wallet.Wallet, ref *Reference, entry *ledger.Entry, now time.Time) (Outcome, error) {
+	var journal ledger.Journal
+	if entry != nil {
+		var err error
+		if journal, err = ledger.Transfer(*entry, tx.s.Kind.counterparty()); err != nil {
+			return Outcome{}, err
+		}
+	}
 	if err := link(tx, ref); err != nil {
 		return Outcome{}, err
 	}
 	if err := tx.MarkProcessed(Result{Balance: w.Balance(), WalletVersion: w.Version()}, now); err != nil {
 		return Outcome{}, err
 	}
-	return Outcome{Entry: entry, Events: tx.processedEvents(entry, now)}, nil
+	return Outcome{Entry: entry, Journal: journal, Events: tx.processedEvents(entry, now)}, nil
 }
 
 func reject(tx *Transaction, result *Result, ref *Reference, code FailureCode, now time.Time) (Outcome, error) {

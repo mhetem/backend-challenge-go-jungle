@@ -74,6 +74,10 @@ func (nopLedger) Insert(context.Context, ledger.Entry) error {
 	return nil
 }
 
+func (nopLedger) Post(context.Context, ledger.Journal) error {
+	return nil
+}
+
 type nopOutbox struct {
 	app.Outbox
 }

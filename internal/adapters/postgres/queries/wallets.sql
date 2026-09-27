@@ -15,3 +15,9 @@ SELECT * FROM wallets WHERE id = $1 FOR UPDATE;
 
 -- name: GetWalletByPlayer :one
 SELECT * FROM wallets WHERE player_id = $1 AND currency = $2;
+
+-- name: SumWalletBalances :many
+SELECT currency, count(*)::bigint AS wallets, round(sum(balance_minor) / 100, 2)::text AS balance
+FROM wallets
+GROUP BY currency
+ORDER BY currency;

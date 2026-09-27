@@ -3,9 +3,12 @@
 package schema_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -96,7 +99,51 @@ func opening(s seeded, balance int64) database.InsertTransactionParams {
 	}
 }
 
+func journal(walletID, transactionID uuid.UUID, counterparty, playerDirection string, amount int64) []database.InsertLedgerPostingParams {
+	other := "DEBIT"
+	if playerDirection == "DEBIT" {
+		other = "CREDIT"
+	}
+	return []database.InsertLedgerPostingParams{
+		{WalletID: walletID, TransactionID: transactionID, Account: "PLAYER_BALANCES", Direction: playerDirection, AmountMinor: amount, Currency: "BRL", CreatedAt: t0},
+		{WalletID: walletID, TransactionID: transactionID, Account: counterparty, Direction: other, AmountMinor: amount, Currency: "BRL", CreatedAt: t0},
+	}
+}
+
+func post(ctx context.Context, q *database.Queries, postings ...database.InsertLedgerPostingParams) error {
+	for _, p := range postings {
+		if err := q.InsertLedgerPosting(ctx, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func betDebit(s seeded, transactionID uuid.UUID) database.InsertLedgerEntryParams {
+	return database.InsertLedgerEntryParams{
+		ID:                 ledger.EntryID(transactionID),
+		WalletID:           s.walletID,
+		TransactionID:      transactionID,
+		Direction:          "DEBIT",
+		AmountMinor:        2500,
+		Currency:           "BRL",
+		BalanceBeforeMinor: 10000,
+		BalanceAfterMinor:  7500,
+		WalletVersion:      2,
+		CreatedAt:          t0,
+	}
+}
+
+func betApplied(s seeded) database.UpdateWalletBalanceParams {
+	return database.UpdateWalletBalanceParams{ID: s.walletID, Version: 1, BalanceMinor: 7500, UpdatedAt: t0}
+}
+
 func openWallet(t *testing.T, pool *pgxpool.Pool, balance int64) seeded {
+	t.Helper()
+	return seedWallet(t, pool, balance, true)
+}
+
+func seedWallet(t *testing.T, pool *pgxpool.Pool, balance int64, posted bool) seeded {
 	t.Helper()
 	s := seeded{walletID: uuid.New(), playerID: uuid.New()}
 	s.openingID = wallet.OpeningTransactionID(s.walletID)
@@ -119,7 +166,7 @@ func openWallet(t *testing.T, pool *pgxpool.Pool, balance int64) seeded {
 		if err := q.InsertTransaction(ctx, opening(s, balance)); err != nil {
 			return err
 		}
-		return q.InsertLedgerEntry(ctx, database.InsertLedgerEntryParams{
+		if err := q.InsertLedgerEntry(ctx, database.InsertLedgerEntryParams{
 			ID:                 ledger.EntryID(s.openingID),
 			WalletID:           s.walletID,
 			TransactionID:      s.openingID,
@@ -130,7 +177,10 @@ func openWallet(t *testing.T, pool *pgxpool.Pool, balance int64) seeded {
 			BalanceAfterMinor:  balance,
 			WalletVersion:      1,
 			CreatedAt:          t0,
-		})
+		}); err != nil || !posted {
+			return err
+		}
+		return post(ctx, q, journal(s.walletID, s.openingID, "FUNDING", "CREDIT", balance)...)
 	})
 	if err != nil {
 		t.Fatalf("open wallet: %v", err)
@@ -237,24 +287,26 @@ func TestLedgerIsAppendOnly(t *testing.T) {
 	db := dbtest.New(t)
 	ctx := t.Context()
 	openWallet(t, db.App, 10000)
-	statements := []string{
-		`UPDATE ledger_entries SET created_at = now()`,
-		`DELETE FROM ledger_entries`,
-		`TRUNCATE ledger_entries`,
-	}
-	for _, stmt := range statements {
-		_, err := db.App.Exec(ctx, stmt)
-		requireCode(t, err, insufficientPrivilege, "")
-	}
 	owner := db.Migrator(t)
-	for _, stmt := range statements {
-		_, err := owner.Exec(ctx, stmt)
-		requireCode(t, err, integrityViolation, "ledger_entries_append_only")
-	}
-	var entries int
-	must(t, db.App.QueryRow(ctx, `SELECT count(*) FROM ledger_entries`).Scan(&entries))
-	if entries != 1 {
-		t.Fatalf("%d ledger entries; want the opening entry only", entries)
+	for table, rows := range map[string]int{"ledger_entries": 1, "ledger_postings": 2} {
+		statements := []string{
+			`UPDATE ` + table + ` SET created_at = now()`,
+			`DELETE FROM ` + table,
+			`TRUNCATE ` + table,
+		}
+		for _, stmt := range statements {
+			_, err := db.App.Exec(ctx, stmt)
+			requireCode(t, err, insufficientPrivilege, "")
+		}
+		for _, stmt := range statements {
+			_, err := owner.Exec(ctx, stmt)
+			requireCode(t, err, integrityViolation, table+"_append_only")
+		}
+		var n int
+		must(t, db.App.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&n))
+		if n != rows {
+			t.Fatalf("%d rows in %s; want the opening's %d", n, table, rows)
+		}
 	}
 }
 
@@ -378,23 +430,14 @@ func TestBalanceChangeRequiresLedgerEntry(t *testing.T) {
 	requireCode(t, err, integrityViolation, "wallets_ledger_coupling")
 
 	bet := external(s, "bet-1", "BET", "PROCESSED", 2500)
-	debit := database.InsertLedgerEntryParams{
-		ID:                 ledger.EntryID(bet.ID),
-		WalletID:           s.walletID,
-		TransactionID:      bet.ID,
-		Direction:          "DEBIT",
-		AmountMinor:        2500,
-		Currency:           "BRL",
-		BalanceBeforeMinor: 10000,
-		BalanceAfterMinor:  7500,
-		WalletVersion:      2,
-		CreatedAt:          t0,
-	}
 	err = inTx(t, db.App, func(q *database.Queries) error {
 		if err := q.InsertTransaction(ctx, bet); err != nil {
 			return err
 		}
-		return q.InsertLedgerEntry(ctx, debit)
+		if err := q.InsertLedgerEntry(ctx, betDebit(s, bet.ID)); err != nil {
+			return err
+		}
+		return post(ctx, q, journal(s.walletID, bet.ID, "GAMING_REVENUE", "DEBIT", 2500)...)
 	})
 	requireCode(t, err, integrityViolation, "ledger_entries_wallet_coupling")
 
@@ -402,10 +445,13 @@ func TestBalanceChangeRequiresLedgerEntry(t *testing.T) {
 		if err := q.InsertTransaction(ctx, bet); err != nil {
 			return err
 		}
-		if err := q.InsertLedgerEntry(ctx, debit); err != nil {
+		if err := q.InsertLedgerEntry(ctx, betDebit(s, bet.ID)); err != nil {
 			return err
 		}
-		rows, err := q.UpdateWalletBalance(ctx, database.UpdateWalletBalanceParams{ID: s.walletID, Version: 1, BalanceMinor: 7500, UpdatedAt: t0})
+		if err := post(ctx, q, journal(s.walletID, bet.ID, "GAMING_REVENUE", "DEBIT", 2500)...); err != nil {
+			return err
+		}
+		rows, err := q.UpdateWalletBalance(ctx, betApplied(s))
 		if err == nil && rows != 1 {
 			t.Errorf("UpdateWalletBalance touched %d rows", rows)
 		}
@@ -417,6 +463,149 @@ func TestBalanceChangeRequiresLedgerEntry(t *testing.T) {
 	if balance != 7500 || version != 2 {
 		t.Fatalf("wallet = %d at version %d; want 7500 at version 2", balance, version)
 	}
+}
+
+func TestJournalsBalanceAndMirrorTheWalletLedger(t *testing.T) {
+	t.Parallel()
+	db := dbtest.New(t)
+	ctx := t.Context()
+	legs := func(w, tx uuid.UUID) []database.InsertLedgerPostingParams {
+		return journal(w, tx, "GAMING_REVENUE", "DEBIT", 2500)
+	}
+	tests := []struct {
+		name       string
+		status     string
+		moves      bool
+		postings   func(w, tx uuid.UUID) []database.InsertLedgerPostingParams
+		code       string
+		constraint string
+	}{
+		{"a balanced journal", "PROCESSED", true, legs, "", ""},
+		{"no journal", "PROCESSED", true, func(uuid.UUID, uuid.UUID) []database.InsertLedgerPostingParams {
+			return nil
+		}, integrityViolation, "ledger_journal_balanced"},
+		{"a single leg", "PROCESSED", true, func(w, tx uuid.UUID) []database.InsertLedgerPostingParams {
+			return legs(w, tx)[:1]
+		}, integrityViolation, "ledger_journal_balanced"},
+		{"both legs on the same side", "PROCESSED", true, func(w, tx uuid.UUID) []database.InsertLedgerPostingParams {
+			p := legs(w, tx)
+			p[1].Direction = "DEBIT"
+			return p
+		}, integrityViolation, "ledger_journal_balanced"},
+		{"the opening's counterparty", "PROCESSED", true, func(w, tx uuid.UUID) []database.InsertLedgerPostingParams {
+			return journal(w, tx, "FUNDING", "DEBIT", 2500)
+		}, integrityViolation, "ledger_journal_accounts"},
+		{"the player leg against the entry", "PROCESSED", true, func(w, tx uuid.UUID) []database.InsertLedgerPostingParams {
+			return journal(w, tx, "GAMING_REVENUE", "CREDIT", 2500)
+		}, integrityViolation, "ledger_journal_accounts"},
+		{"a journal without a wallet entry", "PROCESSED", false, legs, integrityViolation, "ledger_journal_accounts"},
+		{"a rejected transaction", "REJECTED", false, legs, integrityViolation, "ledger_journal_processed"},
+		{"a leg for another amount", "PROCESSED", true, func(w, tx uuid.UUID) []database.InsertLedgerPostingParams {
+			p := legs(w, tx)
+			p[1].AmountMinor = 999
+			return p
+		}, foreignKeyViolation, "ledger_postings_transaction_fkey"},
+		{"an account outside the chart", "PROCESSED", true, func(w, tx uuid.UUID) []database.InsertLedgerPostingParams {
+			p := legs(w, tx)
+			p[1].Account = "HOUSE"
+			return p
+		}, checkViolation, "ledger_postings_account"},
+		{"two legs on one account", "PROCESSED", true, func(w, tx uuid.UUID) []database.InsertLedgerPostingParams {
+			p := legs(w, tx)
+			p[1].Account = "PLAYER_BALANCES"
+			return p
+		}, uniqueViolation, "ledger_postings_pkey"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openWallet(t, db.App, 10000)
+			bet := external(s, "bet-"+uuid.NewString(), "BET", tt.status, 2500)
+			err := inTx(t, db.App, func(q *database.Queries) error {
+				if err := q.InsertTransaction(ctx, bet); err != nil {
+					return err
+				}
+				if tt.moves {
+					if err := q.InsertLedgerEntry(ctx, betDebit(s, bet.ID)); err != nil {
+						return err
+					}
+					if _, err := q.UpdateWalletBalance(ctx, betApplied(s)); err != nil {
+						return err
+					}
+				}
+				return post(ctx, q, tt.postings(s.walletID, bet.ID)...)
+			})
+			if tt.constraint == "" {
+				must(t, err)
+				return
+			}
+			requireCode(t, err, tt.code, tt.constraint)
+		})
+	}
+}
+
+func TestPostingsMigrationBackfillsTheLedger(t *testing.T) {
+	t.Parallel()
+	db := dbtest.New(t)
+	ctx := t.Context()
+	provider := db.Migrations(t)
+	if _, err := provider.DownTo(ctx, 11); err != nil {
+		t.Fatalf("down to 11: %v", err)
+	}
+	s := seedWallet(t, db.App, 10000, false)
+	bet := external(s, "bet-1", "BET", "PROCESSED", 2500)
+	must(t, inTx(t, db.App, func(q *database.Queries) error {
+		if err := q.InsertTransaction(ctx, bet); err != nil {
+			return err
+		}
+		if err := q.InsertLedgerEntry(ctx, betDebit(s, bet.ID)); err != nil {
+			return err
+		}
+		_, err := q.UpdateWalletBalance(ctx, betApplied(s))
+		return err
+	}))
+	if _, err := provider.UpTo(ctx, 12); err != nil {
+		t.Fatalf("up to 12: %v", err)
+	}
+
+	rows, err := db.App.Query(ctx, `SELECT transaction_id, account, direction, amount_minor FROM ledger_postings`)
+	must(t, err)
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var (
+			txID               uuid.UUID
+			account, direction string
+			amount             int64
+		)
+		must(t, rows.Scan(&txID, &account, &direction, &amount))
+		got[txID.String()+" "+account] = fmt.Sprintf("%s %d", direction, amount)
+	}
+	must(t, rows.Err())
+	want := map[string]string{
+		s.openingID.String() + " FUNDING":         "DEBIT 10000",
+		s.openingID.String() + " PLAYER_BALANCES": "CREDIT 10000",
+		bet.ID.String() + " PLAYER_BALANCES":      "DEBIT 2500",
+		bet.ID.String() + " GAMING_REVENUE":       "CREDIT 2500",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("backfilled postings = %v; want %v", got, want)
+	}
+
+	win := external(s, "win-1", "WIN", "PROCESSED", 1000)
+	err = inTx(t, db.App, func(q *database.Queries) error {
+		if err := q.InsertTransaction(ctx, win); err != nil {
+			return err
+		}
+		if err := q.InsertLedgerEntry(ctx, database.InsertLedgerEntryParams{
+			ID: ledger.EntryID(win.ID), WalletID: s.walletID, TransactionID: win.ID, Direction: "CREDIT", AmountMinor: 1000,
+			Currency: "BRL", BalanceBeforeMinor: 7500, BalanceAfterMinor: 8500, WalletVersion: 3, CreatedAt: t0,
+		}); err != nil {
+			return err
+		}
+		_, err := q.UpdateWalletBalance(ctx, database.UpdateWalletBalanceParams{ID: s.walletID, Version: 2, BalanceMinor: 8500, UpdatedAt: t0})
+		return err
+	})
+	requireCode(t, err, integrityViolation, "ledger_journal_balanced")
 }
 
 func TestWalletIdentityIsImmutable(t *testing.T) {

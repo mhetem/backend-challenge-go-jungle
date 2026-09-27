@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strconv"
 
 	"github.com/google/uuid"
@@ -32,10 +34,18 @@ type Reconciliation struct {
 	WalletID           uuid.UUID
 	StoredBalance      money.Money
 	CalculatedBalance  money.Money
+	PostedBalance      money.Money
 	Difference         money.Money
 	CheckedEntries     int64
 	ContinuousVersions bool
 	Consistent         bool
+}
+
+type TrialBalance struct {
+	Ledger         ledger.TrialBalance
+	Wallets        int64
+	WalletBalances money.Money
+	Consistent     bool
 }
 
 type WalletService struct {
@@ -70,6 +80,9 @@ func (s *WalletService) Open(ctx context.Context, cmd OpenWallet) (snapshot wall
 			return err
 		}
 		if err := st.Ledger().Insert(ctx, *opened.Entry); err != nil {
+			return err
+		}
+		if err := st.Ledger().Post(ctx, opened.Journal); err != nil {
 			return err
 		}
 		return st.Outbox().Insert(ctx, opened.Events...)
@@ -172,16 +185,18 @@ func (s *WalletService) Reconcile(ctx context.Context, walletID uuid.UUID) (resu
 		WalletID:           walletID,
 		StoredBalance:      w.Balance(),
 		CalculatedBalance:  summary.Net,
+		PostedBalance:      summary.Posted,
 		Difference:         difference,
 		CheckedEntries:     summary.Entries,
 		ContinuousVersions: continuous(w.Version(), summary),
 	}
-	r.Consistent = balanced && r.ContinuousVersions
+	r.Consistent = balanced && r.ContinuousVersions && r.PostedBalance == r.StoredBalance
 	if !r.Consistent {
 		s.log.WarnContext(ctx, "wallet diverges from its ledger",
 			"walletId", walletID,
 			"storedBalance", r.StoredBalance.String(),
 			"calculatedBalance", r.CalculatedBalance.String(),
+			"postedBalance", r.PostedBalance.String(),
 			"difference", r.Difference.String(),
 			"checkedEntries", r.CheckedEntries,
 			"walletVersion", w.Version(),
@@ -192,6 +207,71 @@ func (s *WalletService) Reconcile(ctx context.Context, walletID uuid.UUID) (resu
 		s.metrics.ReconciliationDiverged()
 	}
 	return r, nil
+}
+
+func (s *WalletService) TrialBalance(ctx context.Context) (balances []TrialBalance, err error) {
+	ctx, span := startSpan(ctx, "WalletService.TrialBalance")
+	defer func() { endSpan(span, err) }()
+	var accounts []ledger.AccountTotals
+	var wallets []WalletTotals
+	err = s.tx.InReadOnlySnapshot(ctx, func(ctx context.Context, st Store) error {
+		var err error
+		if accounts, err = st.Ledger().Totals(ctx); err != nil {
+			return err
+		}
+		wallets, err = st.Wallets().Totals(ctx)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	byCurrency := map[money.Currency][]ledger.AccountTotals{}
+	for _, a := range accounts {
+		cur, _ := a.Debits.Currency()
+		byCurrency[cur] = append(byCurrency[cur], a)
+	}
+	stored := map[money.Currency]WalletTotals{}
+	for _, w := range wallets {
+		cur, _ := w.Balance.Currency()
+		stored[cur] = w
+		if _, ok := byCurrency[cur]; !ok {
+			byCurrency[cur] = nil
+		}
+	}
+	balances = []TrialBalance{}
+	for _, cur := range slices.Sorted(maps.Keys(byCurrency)) {
+		tb, err := s.trialBalance(ctx, cur, byCurrency[cur], stored[cur])
+		if err != nil {
+			return nil, err
+		}
+		balances = append(balances, tb)
+	}
+	return balances, nil
+}
+
+func (s *WalletService) trialBalance(ctx context.Context, cur money.Currency, accounts []ledger.AccountTotals, wallets WalletTotals) (TrialBalance, error) {
+	books, err := ledger.NewTrialBalance(cur, accounts)
+	if err != nil {
+		return TrialBalance{}, fmt.Errorf("%w: %s trial balance: %w", ErrPermanent, cur, err)
+	}
+	tb := TrialBalance{Ledger: books, Wallets: wallets.Wallets, WalletBalances: wallets.Balance}
+	if tb.Wallets == 0 {
+		tb.WalletBalances, _ = money.Zero(cur)
+	}
+	players := books.Account(ledger.PlayerBalances).Balance
+	tb.Consistent = books.Balanced() && players == tb.WalletBalances
+	if !tb.Consistent {
+		s.log.WarnContext(ctx, "ledger trial balance diverges",
+			"currency", cur,
+			"debits", books.Debits.String(),
+			"credits", books.Credits.String(),
+			"playerBalances", players.String(),
+			"walletBalances", tb.WalletBalances.String(),
+			"wallets", tb.Wallets,
+		)
+		s.metrics.ReconciliationDiverged()
+	}
+	return tb, nil
 }
 
 func continuous(version int64, s LedgerSummary) bool {

@@ -1,9 +1,9 @@
 # Serviço de processamento de wagers
 
-Processamento de wallets e wagers em Go: ledger append-only no PostgreSQL, ingestão síncrona
-via HTTP e via SQS FIFO, inbox e outbox transacionais, e tokens de serviço emitidos pelo
-Keycloak. Toda instância executa todos os componentes, e a corretude não depende de quantas
-instâncias estão rodando.
+Processamento de wallets e wagers em Go: ledger append-only em partidas dobradas no
+PostgreSQL, ingestão síncrona via HTTP e via SQS FIFO, inbox e outbox transacionais, e tokens
+de serviço emitidos pelo Keycloak. Toda instância executa todos os componentes, e a
+corretude não depende de quantas instâncias estão rodando.
 
 As decisões técnicas, os contratos e as limitações estão em [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -39,8 +39,8 @@ O compose sobe PostgreSQL, Keycloak (com o realm importado), MiniStack (SQS e IA
 
 `scripts/smoke.sh` percorre o fluxo inteiro espalhado pelas três instâncias: abre uma
 carteira, faz `BET`, replay, `WIN`, um `ROLLBACK` que chega antes da sua `BET`, uma `BET`
-por SQS, lê o ledger, reconcilia e lê um evento de `wallet-events.fifo`. Sai com erro em
-qualquer divergência.
+por SQS, lê o ledger, reconcilia, confere o balancete do ledger de partidas dobradas e lê um
+evento de `wallet-events.fifo`. Sai com erro em qualquer divergência.
 
 Para derrubar tudo e apagar os volumes: `make down` (`docker compose down -v`).
 
@@ -203,7 +203,7 @@ sobe. Todos os clients são confidenciais e usam `client_credentials`:
 |---|---|---|
 | `provider-a` | `wager-provider`, `provider_id=provider-a` | Enviar wagers de `provider-a` e ler as próprias transações |
 | `provider-b` | `wager-provider`, `provider_id=provider-b` | O mesmo, como `provider-b` |
-| `wallet-backoffice` | `wallet-operator` | Abrir, ler e reconciliar carteiras; ler qualquer transação |
+| `wallet-backoffice` | `wallet-operator` | Abrir, ler e reconciliar carteiras; ler o balancete e qualquer transação |
 | `provider-a-shortlived` | `wager-provider` | Como `provider-a`, com tokens de 5 s (teste de expiração) |
 | `no-role-client` | nenhum | Nada (teste de token sem papel) |
 | `no-audience-client` | `wager-provider` | Nada: o token não tem a audiência `wagering-api` |
@@ -286,8 +286,29 @@ curl -s -X POST http://localhost:8081/wallets/$WALLET/reconciliation -H "Authori
 ```
 
 ```json
-{"walletId":"0192f291-27dd-7d3f-8071-5f8685deef37","storedBalance":{"amount":"975.00","currency":"BRL"},"calculatedBalance":{"amount":"975.00","currency":"BRL"},"difference":{"amount":"0.00","currency":"BRL"},"consistent":true,"continuousVersions":true,"checkedEntries":2}
+{"walletId":"0192f291-27dd-7d3f-8071-5f8685deef37","storedBalance":{"amount":"975.00","currency":"BRL"},"calculatedBalance":{"amount":"975.00","currency":"BRL"},"postedBalance":{"amount":"975.00","currency":"BRL"},"difference":{"amount":"0.00","currency":"BRL"},"consistent":true,"continuousVersions":true,"checkedEntries":2}
 ```
+
+`calculatedBalance` vem do ledger da carteira, e `postedBalance` vem do ledger de partidas
+dobradas.
+
+Balancete do ledger de partidas dobradas (`wallet-backoffice`). Considerando só a abertura e a
+aposta acima:
+
+```sh
+curl -s http://localhost:8081/ledger/trial-balance -H "Authorization: Bearer $OPERATOR"
+```
+
+```json
+{"currencies":[{"currency":"BRL","accounts":[{"account":"FUNDING","normalBalance":"DEBIT","postings":1,"debits":{"amount":"1000.00","currency":"BRL"},"credits":{"amount":"0.00","currency":"BRL"},"balance":{"amount":"1000.00","currency":"BRL"}},{"account":"PLAYER_BALANCES","normalBalance":"CREDIT","postings":2,"debits":{"amount":"25.00","currency":"BRL"},"credits":{"amount":"1000.00","currency":"BRL"},"balance":{"amount":"975.00","currency":"BRL"}},{"account":"GAMING_REVENUE","normalBalance":"CREDIT","postings":1,"debits":{"amount":"0.00","currency":"BRL"},"credits":{"amount":"25.00","currency":"BRL"},"balance":{"amount":"25.00","currency":"BRL"}}],"debits":{"amount":"1025.00","currency":"BRL"},"credits":{"amount":"1025.00","currency":"BRL"},"balanced":true,"wallets":1,"walletBalances":{"amount":"975.00","currency":"BRL"},"consistent":true}]}
+```
+
+- Cada movimentação grava um journal com um débito e um crédito: a aposta debita
+  `PLAYER_BALANCES` e credita `GAMING_REVENUE`.
+- `balanced` indica que débitos e créditos da moeda são iguais. `consistent` indica que,
+  além disso, `PLAYER_BALANCES` é igual à soma das carteiras.
+- O plano de contas e as regras que o banco impõe estão em
+  [ARCHITECTURE.md › Ledger de partidas dobradas](ARCHITECTURE.md#ledger-de-partidas-dobradas).
 
 Health checks, públicos:
 
@@ -593,36 +614,50 @@ relatórios completos estão em [docs/load-tests/](docs/load-tests/).
 
 | | Open loop, 100 req/s | Closed loop, 64 em voo |
 |---|---:|---:|
-| Requisições em 60 s | 6.000 | 101.664 |
-| Vazão | 100,0 req/s | 1.692,1 req/s |
+| Requisições em 60 s | 6.000 | 72.576 |
+| Vazão | 100,0 req/s | 1.208,6 req/s |
 | Erros | 0 | 0 |
-| Latência p50 / p95 / p99 | 5,6 / 12,3 / 22,4 ms | 33,3 / 80,8 / 117,4 ms |
-| Latência máxima | 42,0 ms | 355,3 ms |
-| Replays respondidos | 305 | 5.052 |
+| Latência p50 / p95 / p99 | 6,6 / 8,0 / 9,8 ms | 46,7 / 112,4 / 162,0 ms |
+| Latência máxima | 23,0 ms | 502,6 ms |
+| Replays respondidos | 297 | 3.521 |
 | Transações repetidas pelo `InTx`, respostas 409, claims perdidos | 0, 0, 0 | 0, 0, 0 |
-| Maior backlog da outbox | 72 eventos | 181.293 eventos |
-| Commit até publicação, p50 / p99 | 0,19 / 0,36 s | 78,4 / 170,2 s |
-| Outbox depois da carga | vazia em 0,3 s | 165.875 eventos pendentes após 2 min |
+| Maior backlog da outbox | 63 eventos | 127.299 eventos |
+| Commit até publicação, p50 / p99 | 0,20 / 0,39 s | 76,6 / 167,7 s |
+| Outbox depois da carga | vazia em 0,3 s | 112.029 eventos pendentes após 2 min |
 | Reconciliação | 50 de 50 carteiras | 50 de 50 carteiras |
 
 Leitura:
-- A 100 req/s o serviço responde em cerca de 5 ms (p50 de 5,6 ms). O p99 de 22 ms já inclui
-  qualquer espera na fila, porque o teste é open loop. A outbox publica cada evento em menos
-  de meio segundo e esvazia logo depois da carga.
-- A cauda do open loop variou entre execuções com a mesma carga. O p50 ficou entre 5,2 e 5,6
-  ms nas três, mas o p95/p99 foi 7,1/9,1 ms e 6,5/8,2 ms nas duas primeiras e 12,3/22,4 ms
-  nesta. Entre elas mudaram só a migration `00010` (um índice parcial da outbox trocado por
-  outro com o mesmo predicado) e a frequência dos gauges. A diferença não foi investigada,
-  e cada configuração rodou uma única vez numa máquina de desenvolvimento.
-- Em closed loop as três instâncias processaram 1.692 req/s sem erro e sem conflito, e todas
-  as carteiras fecharam na reconciliação. A latência sobe porque 64 requisições disputam 50
-  carteiras e um único PostgreSQL. Requisições concorrentes na mesma carteira esperam o lock
-  da carteira em vez de falhar, e nenhuma esperou mais que o `lock_timeout` de 2 s.
-- Na carga máxima, a publicação ficou presa no emulador. Medido durante as drenagens, o
-  container `aws` ficou entre 100% e 110% de CPU (Python numa thread), com as instâncias
-  entre 1% e 4% e o PostgreSQL em cerca de 6%, publicando de 85 a 95 eventos por segundo. É o custo O(n) da deduplicação
-  do MiniStack descrito acima. Os eventos esperam na outbox, nada se perde, e a publicação
-  continua depois da carga.
+- A 100 req/s o serviço responde em cerca de 7 ms (p50 de 6,6 ms). O p99 de 9,8 ms já
+  inclui qualquer espera na fila, porque o teste é open loop. A outbox publica cada evento
+  em menos de meio segundo e esvazia logo depois da carga.
+- Em closed loop as três instâncias processaram 1.209 req/s sem erro e sem conflito. Todas
+  as carteiras fecharam na reconciliação, que também confere o ledger de partidas dobradas
+  (`postedBalance`). A latência sobe porque 64 requisições disputam 50 carteiras e um único
+  PostgreSQL. Requisições concorrentes na mesma carteira esperam o lock da carteira em vez de
+  falhar, e nenhuma esperou mais que o `lock_timeout` de 2 s.
+- Desde a execução anterior entraram duas mudanças no caminho de cada requisição, e as duas
+  custam:
+  - o tracing: no compose, toda requisição gera spans, um por query, exportados ao Jaeger
+    na mesma máquina;
+  - o ledger de partidas dobradas: dois `INSERT` a mais por movimentação e três
+    verificações da trigger no commit.
+
+  Juntas, elas levaram o p50 a 100 req/s de 5,6 para 6,6 ms e a vazão máxima de 1.692 para
+  1.209 req/s (29% a menos), com o p50 do closed loop indo de 33,3 para 46,7 ms. O custo de
+  cada uma não foi medido separadamente. Para isolar o do ledger, basta tirar
+  `OTEL_EXPORTER_OTLP_ENDPOINT` do `compose.yaml` e repetir a carga: sem ele, o tracing fica
+  desligado.
+- A cauda do open loop varia entre execuções. Nas três anteriores ao tracing e ao ledger, o
+  p50 ficou entre 5,2 e 5,6 ms, mas o p95/p99 foi 7,1/9,1, 6,5/8,2 e 12,3/22,4 ms. Entre elas
+  mudaram só a migration `00010` (um índice parcial da outbox trocado por outro com o mesmo
+  predicado) e a frequência dos gauges. Nesta execução, foi 8,0/9,8 ms. O p99 de 22 ms da
+  terceira não foi investigado, e cada configuração rodou uma única vez numa máquina de
+  desenvolvimento.
+- Na carga máxima, a publicação fica presa no emulador. Medido durante as drenagens da
+  terceira execução, o container `aws` ficou entre 100% e 110% de CPU (Python numa thread),
+  com as instâncias entre 1% e 4% e o PostgreSQL em cerca de 6%, publicando de 85 a 95
+  eventos por segundo. É o custo O(n) da deduplicação do MiniStack descrito acima. Os
+  eventos esperam na outbox, nada se perde, e a publicação continua depois da carga.
 
 Problemas que o teste de carga encontrou, já corrigidos:
 - **Gauges da outbox congelados.** `wallet_outbox_pending` e
@@ -634,7 +669,7 @@ Problemas que o teste de carga encontrou, já corrigidos:
   pelo índice de `seq` e descartando 44 mil linhas já publicadas para achar 50 pendentes
   (32 ms por claim, crescendo com o histórico, que nunca é apagado). A migration `00010` cria
   um índice parcial em `seq` só das linhas pendentes, e remove o índice em `next_attempt_at`,
-  que nenhuma query usava. Na drenagem desta execução, com 162 mil pendentes, o claim
+  que nenhuma query usava. Na drenagem da terceira execução, com 162 mil pendentes, o claim
   descartou 90 linhas (as que estavam em claim) e levou 0,4 ms. A busca do evento pendente
   mais antigo caiu de 35 ms para 0,1 ms.
 - **Custo da própria correção.** A primeira versão atualizava os gauges a cada
@@ -642,7 +677,8 @@ Problemas que o teste de carga encontrou, já corrigidos:
   e o PostgreSQL chegou a 26% de CPU só com isso. Agora a atualização durante drenagens é a
   cada 10 intervalos (5 s), e o PostgreSQL voltou a cerca de 6% na mesma situação.
 
-Os números da tabela são da terceira execução, já com as três correções.
+Os números da tabela são da quarta execução, com as três correções, o tracing e o ledger de
+partidas dobradas.
 
 ## Estrutura
 

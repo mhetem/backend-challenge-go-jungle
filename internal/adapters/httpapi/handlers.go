@@ -23,6 +23,7 @@ type Wallets interface {
 	Get(ctx context.Context, id uuid.UUID) (wallet.Snapshot, error)
 	Ledger(ctx context.Context, walletID uuid.UUID, cursor string, limit int) (app.LedgerPage, error)
 	Reconcile(ctx context.Context, walletID uuid.UUID) (app.Reconciliation, error)
+	TrialBalance(ctx context.Context) ([]app.TrialBalance, error)
 }
 
 type Wagers interface {
@@ -46,6 +47,7 @@ func (a *api) routes(mux *http.ServeMux, protect func(http.Handler) http.Handler
 	handle("GET /wallets/{walletId}", a.getWallet)
 	handle("GET /wallets/{walletId}/ledger", a.getLedger)
 	handle("POST /wallets/{walletId}/reconciliation", a.reconcile)
+	handle("GET /ledger/trial-balance", a.trialBalance)
 	handle("POST /wagering/transactions", a.submitWager)
 	handle("GET /wagering/transactions/{transactionId}", a.getTransaction)
 	handle("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", a.getProviderTransaction)
@@ -167,6 +169,18 @@ func (a *api) reconcile(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, viewReconciliation(result))
+	return nil
+}
+
+func (a *api) trialBalance(w http.ResponseWriter, r *http.Request) error {
+	if err := operator(r); err != nil {
+		return err
+	}
+	balances, err := a.wallets.TrialBalance(r.Context())
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, viewTrialBalance(balances))
 	return nil
 }
 

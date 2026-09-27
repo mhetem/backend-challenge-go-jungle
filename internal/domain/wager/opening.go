@@ -15,6 +15,7 @@ type Opened struct {
 	Wallet      *wallet.Wallet
 	Transaction *Transaction
 	Entry       *ledger.Entry
+	Journal     ledger.Journal
 	Events      []events.Event
 }
 
@@ -30,5 +31,9 @@ func Open(walletID, playerID uuid.UUID, initial money.Money, correlationID strin
 	if err != nil {
 		return Opened{}, err
 	}
-	return Opened{Wallet: w, Transaction: tx, Entry: entry, Events: tx.processedEvents(entry, now)}, nil
+	journal, err := ledger.Transfer(*entry, Opening.counterparty())
+	if err != nil {
+		return Opened{}, err
+	}
+	return Opened{Wallet: w, Transaction: tx, Entry: entry, Journal: journal, Events: tx.processedEvents(entry, now)}, nil
 }

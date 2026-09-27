@@ -102,6 +102,39 @@ func (q *Queries) InsertWallet(ctx context.Context, arg InsertWalletParams) erro
 	return err
 }
 
+const sumWalletBalances = `-- name: SumWalletBalances :many
+SELECT currency, count(*)::bigint AS wallets, round(sum(balance_minor) / 100, 2)::text AS balance
+FROM wallets
+GROUP BY currency
+ORDER BY currency
+`
+
+type SumWalletBalancesRow struct {
+	Currency string
+	Wallets  int64
+	Balance  string
+}
+
+func (q *Queries) SumWalletBalances(ctx context.Context) ([]SumWalletBalancesRow, error) {
+	rows, err := q.db.Query(ctx, sumWalletBalances)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumWalletBalancesRow{}
+	for rows.Next() {
+		var i SumWalletBalancesRow
+		if err := rows.Scan(&i.Currency, &i.Wallets, &i.Balance); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateWalletBalance = `-- name: UpdateWalletBalance :execrows
 UPDATE wallets
 SET balance_minor = $3, version = version + 1, updated_at = $4

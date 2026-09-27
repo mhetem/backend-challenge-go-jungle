@@ -1,6 +1,7 @@
 package wager
 
 import (
+	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/ledger"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/money"
 )
 
@@ -39,6 +40,13 @@ func (k Kind) Origin() Origin {
 
 func (k Kind) Reversal() bool {
 	return k == Refund || k == Rollback
+}
+
+func (k Kind) counterparty() ledger.Account {
+	if k == Opening {
+		return ledger.Funding
+	}
+	return ledger.GamingRevenue
 }
 
 func (k Kind) acceptsReference() bool {

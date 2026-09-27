@@ -190,6 +190,34 @@ func (h *harness) eventTypes(t *testing.T, walletID uuid.UUID) []string {
 	return types
 }
 
+func (h *harness) postings(t *testing.T, walletID uuid.UUID) map[string]int {
+	t.Helper()
+	rows, err := h.db.App.Query(t.Context(), `SELECT account || ' ' || direction, count(*)::int FROM ledger_postings
+		WHERE wallet_id = $1 GROUP BY account, direction`, walletID)
+	must(t, err)
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var leg string
+		var n int
+		must(t, rows.Scan(&leg, &n))
+		out[leg] = n
+	}
+	must(t, rows.Err())
+	return out
+}
+
+func (h *harness) requireConsistentBooks(t *testing.T) {
+	t.Helper()
+	books, err := h.wallets.TrialBalance(t.Context())
+	must(t, err)
+	for _, b := range books {
+		if !b.Consistent || !b.Ledger.Balanced() {
+			t.Fatalf("%s books = %+v; want balanced and tied to the wallet balances", b.Ledger.Currency, b)
+		}
+	}
+}
+
 func debits(entries []ledger.Snapshot) int {
 	n := 0
 	for _, e := range entries {

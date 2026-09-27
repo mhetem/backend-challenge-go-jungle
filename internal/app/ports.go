@@ -37,6 +37,12 @@ type Wallets interface {
 	GetByPlayer(ctx context.Context, playerID uuid.UUID, cur money.Currency) (*wallet.Wallet, error)
 	Insert(ctx context.Context, w *wallet.Wallet) error
 	Update(ctx context.Context, w *wallet.Wallet, expectedVersion int64) error
+	Totals(ctx context.Context) ([]WalletTotals, error)
+}
+
+type WalletTotals struct {
+	Wallets int64
+	Balance money.Money
 }
 
 type Transactions interface {
@@ -59,8 +65,10 @@ type DueTransaction struct {
 
 type Ledger interface {
 	Insert(ctx context.Context, e ledger.Entry) error
+	Post(ctx context.Context, j ledger.Journal) error
 	Page(ctx context.Context, walletID uuid.UUID, afterVersion int64, limit int) ([]ledger.Entry, error)
 	Summarize(ctx context.Context, walletID uuid.UUID, cur money.Currency) (LedgerSummary, error)
+	Totals(ctx context.Context) ([]ledger.AccountTotals, error)
 }
 
 type LedgerSummary struct {
@@ -68,6 +76,7 @@ type LedgerSummary struct {
 	FirstVersion int64
 	LastVersion  int64
 	Net          money.Money
+	Posted       money.Money
 }
 
 type Outbox interface {

@@ -143,8 +143,15 @@ expect 200
 check "consistent" "$(literal consistent)" "true"
 check "continuous versions" "$(literal continuousVersions)" "true"
 check "stored balance" "$(amount storedBalance)" "70.00"
+check "posted balance" "$(amount postedBalance)" "70.00"
 check "difference" "$(amount difference)" "0.00"
 check "checked entries" "$(literal checkedEntries)" "6"
+
+step "trial balance of the double-entry ledger"
+call GET "$app1/ledger/trial-balance" "$operator"
+expect 200
+check "unbalanced or inconsistent currencies" "$(grep -o -e '"balanced":false' -e '"consistent":false' "$body" | wc -l | tr -d ' ')" "0"
+check "BRL books" "$(grep -c '"currency":"BRL","accounts"' "$body")" "1"
 
 step "read an event for the wallet from wallet-events.fifo"
 : >"$body"

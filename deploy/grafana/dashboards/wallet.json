@@ -285,7 +285,7 @@
       "id": 5,
       "type": "stat",
       "title": "Reconciliation divergences",
-      "description": "Reconciliations that found the stored balance or version chain diverging from the ledger, since the instances started.",
+      "description": "Reconciliations and trial balances that found stored balances, the version chain or the double-entry journal diverging from the ledger, since the instances started.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

@@ -65,6 +65,22 @@ func (r wallets) Update(ctx context.Context, w *wallet.Wallet, expectedVersion i
 	return nil
 }
 
+func (r wallets) Totals(ctx context.Context) ([]app.WalletTotals, error) {
+	rows, err := r.q.SumWalletBalances(ctx)
+	if err != nil {
+		return nil, classify(err)
+	}
+	totals := make([]app.WalletTotals, 0, len(rows))
+	for _, row := range rows {
+		balance, err := money.Parse(row.Balance, row.Currency)
+		if err != nil {
+			return nil, corrupt(err)
+		}
+		totals = append(totals, app.WalletTotals{Wallets: row.Wallets, Balance: balance})
+	}
+	return totals, nil
+}
+
 func walletFrom(row database.Wallet, err error) (*wallet.Wallet, error) {
 	if err != nil {
 		return nil, lookup(err, domain.ErrWalletNotFound)
