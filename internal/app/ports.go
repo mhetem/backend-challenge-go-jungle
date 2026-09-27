@@ -67,6 +67,22 @@ type LedgerSummary struct {
 
 type Outbox interface {
 	Insert(ctx context.Context, evs ...events.Event) error
+	Claim(ctx context.Context, owner string, now, until time.Time, limit int) ([]OutboxMessage, error)
+	MarkPublished(ctx context.Context, id uuid.UUID, owner string, now time.Time) (bool, error)
+	Release(ctx context.Context, id uuid.UUID, owner string, next time.Time, lastError string) (bool, error)
+	Backlog(ctx context.Context) (pending int64, oldest time.Time, err error)
+}
+
+type OutboxMessage struct {
+	ID            uuid.UUID
+	Seq           int64
+	PartitionKey  uuid.UUID
+	EventType     string
+	EventVersion  int
+	CorrelationID string
+	Payload       []byte
+	OccurredAt    time.Time
+	Attempts      int
 }
 
 type InboxMessage struct {

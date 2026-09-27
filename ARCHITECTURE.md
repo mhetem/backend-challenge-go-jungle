@@ -345,6 +345,43 @@ outro jogador. As demais guardam o saldo observado na rejeição, e o replay o d
 
 ## Inbox e outbox
 
+Outbox:
+- Os eventos são gravados em `outbox_events` na mesma transação SQL da mudança que os causou
+  (transação, lançamento, saldo). Nada é publicado antes do commit, porque só o worker
+  publica, e ele só enxerga linhas já confirmadas.
+- O publisher roda em toda instância (componente `outbox`), sem líder, em ciclos:
+  1. **Claim**, numa transação curta:
+     `UPDATE … SET claimed_by, claimed_until, attempts + 1 WHERE id IN (SELECT … FOR UPDATE
+     SKIP LOCKED)`, pegando os eventos não publicados, vencidos e sem lease válido, em ordem
+     de `seq`.
+     - Vários publishers disputam a tabela sem se bloquear e recebem conjuntos disjuntos.
+     - O dono do claim é o id da instância mais um UUID gerado a cada processo. Uma instância
+       reiniciada não confunde claims antigos com seus.
+  2. **Publicação**, fora da transação, com `SendMessageBatch` de até 10 mensagens.
+  3. **Confirmação**, numa transação curta, com a condição `claimed_by = eu`:
+     - sucesso grava `published_at`;
+     - falha solta o claim e agenda `next_attempt_at = agora + backoff(attempts)`, que é
+       exponencial a partir de 1 s, com jitter e limite de 5 min, e grava `last_error`.
+
+     Nenhum evento é descartado.
+- O lease padrão é 30 s (`OUTBOX_LEASE`). Se uma instância morre depois do claim, o lease
+  expira e outra instância assume. Uma confirmação tardia da instância antiga é recusada pela
+  condição `claimed_by`.
+- A garantia é at-least-once. Se o processo cai entre publicar e confirmar, o evento é
+  republicado com o mesmo `eventId`, que é também o `MessageDeduplicationId`, então a
+  deduplicação FIFO do SQS (5 min) descarta a cópia. Fora dessa janela, o consumidor
+  deduplica pelo `eventId`.
+- Uma entrada que o SQS não confirmou explicitamente é tratada como falha. Um evento nunca é
+  marcado como publicado sem confirmação.
+- Durante o shutdown, a confirmação de um lote já enviado usa um contexto próprio (5 s). Assim
+  o que já foi publicado fica registrado, em vez de ser republicado depois.
+- Métricas:
+  - `wallet_outbox_publish_results_total{result=published|failed|lost}`;
+  - `wallet_outbox_publish_attempts` (histograma);
+  - `wallet_outbox_pending`;
+  - `wallet_outbox_oldest_pending_age_seconds`.
+- Retenção e limpeza da outbox ficam fora do escopo, e o papel da aplicação não apaga linhas.
+
 ## Contratos SQS
 
 ## Contratos e roteamento de eventos
@@ -372,6 +409,22 @@ Envelope de todo evento:
   `balanceBefore`, `balanceAfter` e `walletVersion`. Consumidores ordenam por
   `walletVersion`.
 - A chave de partição de todo evento é o `walletId`.
+
+Roteamento: todo evento vai para `wallet-events.fifo` (DLQ `wallet-events-dlq.fifo` depois de
+10 recebimentos):
+
+| Campo SQS | Valor |
+|---|---|
+| Corpo | O envelope JSON gravado na outbox (snapshot imutável) |
+| `MessageGroupId` | `walletId`: ordem por carteira, carteiras diferentes em paralelo |
+| `MessageDeduplicationId` | `eventId` |
+| Atributo `eventType` | Tipo do evento, para filtrar sem abrir o corpo |
+| Atributo `eventVersion` | Versão do contrato do evento |
+| Atributo `correlationId` | Correlação da operação de origem |
+
+- Consumidores devem deduplicar pelo `eventId` e ordenar `WalletBalanceChanged` por
+  `walletVersion`. Publishers concorrentes podem entregar eventos da mesma carteira fora de
+  ordem, e a deduplicação FIFO só cobre 5 minutos.
 
 ## Identity provider e validação de token
 

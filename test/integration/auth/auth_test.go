@@ -223,6 +223,7 @@ func TestServerRequiresATokenOutsideHealth(t *testing.T) {
 	db := dbtest.New(t)
 	cfg := load(t, map[string]string{
 		"INSTANCE_ID":  "auth-test",
+		"COMPONENTS":   "http,resolver",
 		"LOG_LEVEL":    "warn",
 		"HTTP_ADDR":    "127.0.0.1:0",
 		"ADMIN_ADDR":   "127.0.0.1:0",

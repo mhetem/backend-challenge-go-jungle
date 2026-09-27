@@ -3,10 +3,12 @@
 package postgres_test
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -553,4 +555,102 @@ func TestDueTransactionsAndMarkFailed(t *testing.T) {
 		return err
 	}))
 	requireEqual(t, ids(due), []uuid.UUID{second.ID(), third.ID()})
+}
+
+func TestOutboxClaimMarkRelease(t *testing.T) {
+	t.Parallel()
+	db := dbtest.New(t)
+	r := newRunner(t, config(db.AppURL))
+	for range 3 {
+		openWallet(t, r, 10000)
+	}
+	now := t0.Add(time.Minute)
+	claim := func(owner string, at time.Time, limit int) []app.OutboxMessage {
+		t.Helper()
+		var msgs []app.OutboxMessage
+		must(t, r.InTx(t.Context(), func(ctx context.Context, s app.Store) error {
+			var err error
+			msgs, err = s.Outbox().Claim(ctx, owner, at, at.Add(30*time.Second), limit)
+			return err
+		}))
+		return msgs
+	}
+	settle := func(fn func(ctx context.Context, o app.Outbox) (bool, error)) bool {
+		t.Helper()
+		var ok bool
+		must(t, r.InTx(t.Context(), func(ctx context.Context, s app.Store) error {
+			var err error
+			ok, err = fn(ctx, s.Outbox())
+			return err
+		}))
+		return ok
+	}
+	backlog := func() (int64, time.Time) {
+		t.Helper()
+		var pending int64
+		var oldest time.Time
+		must(t, r.InTx(t.Context(), func(ctx context.Context, s app.Store) error {
+			var err error
+			pending, oldest, err = s.Outbox().Backlog(ctx)
+			return err
+		}))
+		return pending, oldest
+	}
+
+	a := claim("a", now, 4)
+	b := claim("b", now, 10)
+	if len(a) != 4 || len(b) != 2 || len(claim("c", now, 10)) != 0 {
+		t.Fatalf("claims = %d, %d; want 4 and the remaining 2, then nothing", len(a), len(b))
+	}
+	bySeq := func(x, y app.OutboxMessage) int { return cmp.Compare(x.Seq, y.Seq) }
+	if !slices.IsSortedFunc(a, bySeq) || !slices.IsSortedFunc(b, bySeq) || a[len(a)-1].Seq >= b[0].Seq {
+		t.Fatal("claims are not in seq order, oldest first")
+	}
+	for _, m := range slices.Concat(a, b) {
+		if m.Attempts != 1 || m.Payload == nil || m.EventVersion != 1 {
+			t.Fatalf("claimed %+v; want attempts 1, a payload and version 1", m)
+		}
+	}
+	if pending, oldest := backlog(); pending != 6 || !oldest.Equal(t0) {
+		t.Fatalf("backlog = %d oldest %s; want 6 oldest %s", pending, oldest, t0)
+	}
+
+	if !settle(func(ctx context.Context, o app.Outbox) (bool, error) { return o.MarkPublished(ctx, a[0].ID, "a", now) }) {
+		t.Fatal("the owner could not mark its claim published")
+	}
+	if settle(func(ctx context.Context, o app.Outbox) (bool, error) { return o.MarkPublished(ctx, a[1].ID, "b", now) }) {
+		t.Fatal("another publisher marked a claim it does not hold")
+	}
+	if !settle(func(ctx context.Context, o app.Outbox) (bool, error) {
+		return o.Release(ctx, a[1].ID, "a", now.Add(10*time.Second), "connection refused")
+	}) {
+		t.Fatal("the owner could not release its claim")
+	}
+	var claimedBy *string
+	var lastError string
+	var next time.Time
+	must(t, db.App.QueryRow(t.Context(), `SELECT claimed_by, last_error, next_attempt_at FROM outbox_events WHERE id = $1`, a[1].ID).
+		Scan(&claimedBy, &lastError, &next))
+	if claimedBy != nil || lastError != "connection refused" || !next.Equal(now.Add(10*time.Second)) {
+		t.Fatalf("released row: claimed_by %v, last_error %q, next %s", claimedBy, lastError, next)
+	}
+	if len(claim("c", now, 10)) != 0 {
+		t.Fatal("claimed before the backoff or the leases ran out")
+	}
+
+	later := claim("c", now.Add(40*time.Second), 10)
+	if len(later) != 5 {
+		t.Fatalf("after the leases expired c claimed %d; want the 5 unpublished", len(later))
+	}
+	for _, m := range later {
+		if m.Attempts != 2 {
+			t.Fatalf("reclaimed %s with attempts %d; want 2", m.ID, m.Attempts)
+		}
+	}
+	if settle(func(ctx context.Context, o app.Outbox) (bool, error) { return o.MarkPublished(ctx, a[2].ID, "a", now) }) {
+		t.Fatal("a publisher whose lease expired still marked the event")
+	}
+	if pending, _ := backlog(); pending != 5 {
+		t.Fatalf("backlog = %d; want 5", pending)
+	}
 }

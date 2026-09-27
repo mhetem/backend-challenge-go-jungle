@@ -38,6 +38,7 @@ type Config struct {
 	OIDC             OIDC
 	PendingReference PendingReference
 	Resolver         ResolverConfig
+	Outbox           OutboxConfig
 }
 
 type Database struct {
@@ -65,6 +66,14 @@ type OIDC struct {
 	Issuer   string
 	JWKSURL  string
 	Audience string
+}
+
+type OutboxConfig struct {
+	PollInterval time.Duration
+	BatchSize    int
+	Lease        time.Duration
+	BackoffBase  time.Duration
+	BackoffCap   time.Duration
 }
 
 type ResolverConfig struct {
@@ -127,6 +136,13 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 			BatchSize:    e.positive("RESOLVER_BATCH_SIZE", 100),
 			MaxFailures:  e.positive("RESOLVER_MAX_FAILURES", 3),
 		},
+		Outbox: OutboxConfig{
+			PollInterval: e.duration("OUTBOX_POLL_INTERVAL", 500*time.Millisecond),
+			BatchSize:    e.positive("OUTBOX_BATCH_SIZE", 50),
+			Lease:        e.duration("OUTBOX_LEASE", 30*time.Second),
+			BackoffBase:  e.duration("OUTBOX_BACKOFF_BASE", time.Second),
+			BackoffCap:   e.duration("OUTBOX_BACKOFF_CAP", 5*time.Minute),
+		},
 	}
 	cfg.OIDC.JWKSURL = e.link("OIDC_JWKS_URL", strings.TrimSuffix(cfg.OIDC.Issuer, "/")+"/protocol/openid-connect/certs", "http", "https")
 	if cfg.ShutdownTimeout >= cfg.SQS.VisibilityTimeout {
@@ -134,6 +150,9 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if cfg.PendingReference.BackoffBase > cfg.PendingReference.BackoffCap {
 		e.fail("PENDING_REF_BACKOFF_BASE", "must not exceed PENDING_REF_BACKOFF_CAP (%s)", cfg.PendingReference.BackoffCap)
+	}
+	if cfg.Outbox.BackoffBase > cfg.Outbox.BackoffCap {
+		e.fail("OUTBOX_BACKOFF_BASE", "must not exceed OUTBOX_BACKOFF_CAP (%s)", cfg.Outbox.BackoffCap)
 	}
 	if err := errors.Join(e.errs...); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration:\n%w", err)

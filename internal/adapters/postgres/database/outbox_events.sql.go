@@ -12,6 +12,82 @@ import (
 	"github.com/google/uuid"
 )
 
+const claimOutboxEvents = `-- name: ClaimOutboxEvents :many
+UPDATE outbox_events
+SET claimed_by = $1, claimed_until = $2, attempts = attempts + 1
+WHERE id IN (
+    SELECT id FROM outbox_events
+    WHERE published_at IS NULL
+      AND outbox_events.next_attempt_at <= $3
+      AND (claimed_until IS NULL OR claimed_until < $3)
+    ORDER BY seq
+    LIMIT $4
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, seq, aggregate_type, aggregate_id, partition_key, event_type, event_version, correlation_id, causation_id, payload, occurred_at, attempts, next_attempt_at, claimed_by, claimed_until, published_at, last_error
+`
+
+type ClaimOutboxEventsParams struct {
+	ClaimedBy     *string
+	ClaimedUntil  *time.Time
+	NextAttemptAt time.Time
+	Limit         int32
+}
+
+func (q *Queries) ClaimOutboxEvents(ctx context.Context, arg ClaimOutboxEventsParams) ([]OutboxEvent, error) {
+	rows, err := q.db.Query(ctx, claimOutboxEvents,
+		arg.ClaimedBy,
+		arg.ClaimedUntil,
+		arg.NextAttemptAt,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OutboxEvent{}
+	for rows.Next() {
+		var i OutboxEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.Seq,
+			&i.AggregateType,
+			&i.AggregateID,
+			&i.PartitionKey,
+			&i.EventType,
+			&i.EventVersion,
+			&i.CorrelationID,
+			&i.CausationID,
+			&i.Payload,
+			&i.OccurredAt,
+			&i.Attempts,
+			&i.NextAttemptAt,
+			&i.ClaimedBy,
+			&i.ClaimedUntil,
+			&i.PublishedAt,
+			&i.LastError,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countPendingOutboxEvents = `-- name: CountPendingOutboxEvents :one
+SELECT count(*) FROM outbox_events WHERE published_at IS NULL
+`
+
+func (q *Queries) CountPendingOutboxEvents(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countPendingOutboxEvents)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const insertOutboxEvent = `-- name: InsertOutboxEvent :exec
 INSERT INTO outbox_events (
     id, aggregate_type, aggregate_id, partition_key, event_type, event_version,
@@ -48,4 +124,61 @@ func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventPa
 		arg.NextAttemptAt,
 	)
 	return err
+}
+
+const markOutboxEventPublished = `-- name: MarkOutboxEventPublished :execrows
+UPDATE outbox_events
+SET published_at = $3, last_error = NULL
+WHERE id = $1 AND claimed_by = $2 AND published_at IS NULL
+`
+
+type MarkOutboxEventPublishedParams struct {
+	ID          uuid.UUID
+	ClaimedBy   *string
+	PublishedAt *time.Time
+}
+
+func (q *Queries) MarkOutboxEventPublished(ctx context.Context, arg MarkOutboxEventPublishedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markOutboxEventPublished, arg.ID, arg.ClaimedBy, arg.PublishedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const oldestPendingOutboxEvent = `-- name: OldestPendingOutboxEvent :one
+SELECT occurred_at FROM outbox_events WHERE published_at IS NULL ORDER BY seq LIMIT 1
+`
+
+func (q *Queries) OldestPendingOutboxEvent(ctx context.Context) (time.Time, error) {
+	row := q.db.QueryRow(ctx, oldestPendingOutboxEvent)
+	var occurred_at time.Time
+	err := row.Scan(&occurred_at)
+	return occurred_at, err
+}
+
+const releaseOutboxEvent = `-- name: ReleaseOutboxEvent :execrows
+UPDATE outbox_events
+SET claimed_by = NULL, claimed_until = NULL, next_attempt_at = $3, last_error = $4
+WHERE id = $1 AND claimed_by = $2 AND published_at IS NULL
+`
+
+type ReleaseOutboxEventParams struct {
+	ID            uuid.UUID
+	ClaimedBy     *string
+	NextAttemptAt time.Time
+	LastError     *string
+}
+
+func (q *Queries) ReleaseOutboxEvent(ctx context.Context, arg ReleaseOutboxEventParams) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseOutboxEvent,
+		arg.ID,
+		arg.ClaimedBy,
+		arg.NextAttemptAt,
+		arg.LastError,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
