@@ -410,6 +410,57 @@ A identidade vem só do token. O `providerId` do corpo ou do path é comparado c
 - As decisões são funções puras em `internal/auth`, testadas isoladamente e com tokens reais
   do Keycloak.
 
+## Contrato HTTP
+
+Rotas: `POST /wallets`, `GET /wallets/{walletId}`, `GET /wallets/{walletId}/ledger`,
+`POST /wallets/{walletId}/reconciliation`, `POST /wagering/transactions`,
+`GET /wagering/transactions/{transactionId}` e
+`GET /providers/{providerId}/wagering/transactions/{externalTransactionId}`.
+
+Resultados de `POST /wagering/transactions`. O status vem do estado gravado, seja operação
+nova ou replay:
+
+| Situação | Status | Corpo |
+|---|---|---|
+| Processada (nova ou replay) | 200 | resultado, `idempotentReplay` false/true |
+| Referência pendente | 202 + `Location` | resultado com `status: PENDING_REFERENCE` e `referenceDeadlineAt` |
+| Rejeição de negócio | 422 | resultado com `status: REJECTED`, `failureCode` e o saldo observado |
+| Falha permanente registrada | 500 | resultado com `status: FAILED` e `failureCode: PROCESSING_FAILED` |
+
+O resultado é `{transactionId, externalTransactionId, status, failureCode?, balance?,
+walletVersion?, referenceDeadlineAt?, idempotentReplay}`.
+
+Os demais casos respondem `application/problem+json`:
+
+| Situação | Status | `code` |
+|---|---|---|
+| Campo inválido | 400 | `INVALID_REQUEST`, com um item em `errors[]` por campo |
+| `Idempotency-Key` ausente | 400 | `IDEMPOTENCY_KEY_REQUIRED` |
+| Sem token ou token inválido | 401 | `UNAUTHENTICATED` |
+| Sem permissão | 403 | `FORBIDDEN` |
+| Carteira ou transação inexistente (ou de outro provider) | 404 | `WALLET_NOT_FOUND` / `TRANSACTION_NOT_FOUND` |
+| Chave reutilizada com outro conteúdo | 409 | `IDEMPOTENCY_KEY_REUSED` |
+| `externalTransactionId` já usado com outra chave | 409 | `EXTERNAL_TRANSACTION_ID_CONFLICT` |
+| Jogador já tem carteira na moeda | 409 | `WALLET_ALREADY_EXISTS`, com `Location` da carteira existente |
+| Corpo acima de 64 KiB | 413 | `PAYLOAD_TOO_LARGE` |
+| `Content-Type` diferente de JSON | 415 | `UNSUPPORTED_MEDIA_TYPE` |
+| Indisponibilidade transitória (banco fora, lock timeout, pool esgotado, prazo de 10 s) | 503 + `Retry-After` | `TEMPORARILY_UNAVAILABLE` |
+| Erro interno | 500 | `INTERNAL_ERROR`, sem detalhes internos |
+
+- Todo problem traz `type`, `title`, `status`, `code`, `category`, `retryable` e `errors[]`
+  (sempre presente, `{field, code}`). `retryable` é verdadeiro só para 503.
+- Entrada:
+  - JSON estrito: campos desconhecidos (`UNKNOWN_FIELD`), tipos errados (por exemplo
+    `amount` como número), corpo vazio e qualquer coisa depois do objeto são recusados com
+    400;
+  - `limit` do ledger é um inteiro de 1 a 200, e sem ele o padrão é 50;
+  - o cursor é opaco.
+- `X-Correlation-Id`: um valor válido (1 a 128 caracteres ASCII visíveis) é mantido, e sem
+  ele o servidor gera um UUIDv7. O id volta na resposta, fica gravado na transação e aparece
+  em todos os logs da requisição.
+- Timeouts do servidor: leitura de headers 5 s, leitura 10 s, escrita 15 s, conexão ociosa
+  60 s. Cada requisição tem prazo de 10 s.
+
 ## Controle de acesso ao broker
 
 `deploy/aws/provision.sh` cria as filas e um usuário IAM por papel, cada um com uma policy

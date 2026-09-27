@@ -238,3 +238,25 @@ func TestOpenWalletValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestParseID(t *testing.T) {
+	if id, err := app.ParseID("walletId", walletID); err != nil || id != uuid.MustParse(walletID) {
+		t.Fatalf("ParseID(%s) = %s, %v", walletID, id, err)
+	}
+	for in, want := range map[string]string{
+		"":                                    "walletId: REQUIRED",
+		"not-a-uuid":                          "walletId: INVALID_VALUE",
+		uuid.Nil.String():                     "walletId: INVALID_VALUE",
+		strings.ReplaceAll(walletID, "-", ""): "walletId: INVALID_VALUE",
+	} {
+		if id, err := app.ParseID("walletId", in); err == nil || err.Error() != want || id != uuid.Nil {
+			t.Fatalf("ParseID(%q) = %s, %v; want %q", in, id, err, want)
+		}
+	}
+}
+
+func TestValidToken(t *testing.T) {
+	if !app.ValidToken("provider-a:transaction-123") || app.ValidToken("with space") || app.ValidToken(strings.Repeat("x", 129)) {
+		t.Fatal("ValidToken disagrees with the 1-128 visible ASCII rule")
+	}
+}

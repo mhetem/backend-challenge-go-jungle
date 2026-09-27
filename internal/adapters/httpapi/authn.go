@@ -33,7 +33,7 @@ func authentication(authn auth.Authenticator, reg prometheus.Registerer, log *sl
 			if !ok {
 				failures.WithLabelValues("missing").Inc()
 				w.Header().Set("WWW-Authenticate", challenge)
-				writeProblem(w, http.StatusUnauthorized, "UNAUTHENTICATED", "a bearer access token is required", false)
+				newProblem(http.StatusUnauthorized, "UNAUTHENTICATED", categoryAuthentication, "a bearer access token is required").write(w)
 				return
 			}
 			principal, err := authn.Authenticate(r.Context(), token)
@@ -41,14 +41,13 @@ func authentication(authn auth.Authenticator, reg prometheus.Registerer, log *sl
 			case errors.Is(err, auth.ErrUnavailable):
 				failures.WithLabelValues("unavailable").Inc()
 				log.WarnContext(r.Context(), "cannot verify tokens: signing keys unavailable", "error", err)
-				w.Header().Set("Retry-After", "5")
-				writeProblem(w, http.StatusServiceUnavailable, "TEMPORARILY_UNAVAILABLE", "token verification is temporarily unavailable", true)
+				newProblem(http.StatusServiceUnavailable, "TEMPORARILY_UNAVAILABLE", categoryTransient, "token verification is temporarily unavailable").write(w)
 				return
 			case err != nil:
 				failures.WithLabelValues("invalid").Inc()
 				log.InfoContext(r.Context(), "rejected an access token", "error", err)
 				w.Header().Set("WWW-Authenticate", invalidChallenge)
-				writeProblem(w, http.StatusUnauthorized, "UNAUTHENTICATED", "the access token is invalid or expired", false)
+				newProblem(http.StatusUnauthorized, "UNAUTHENTICATED", categoryAuthentication, "the access token is invalid or expired").write(w)
 				return
 			}
 			ctx := auth.WithPrincipal(r.Context(), principal)

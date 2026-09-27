@@ -125,10 +125,10 @@ func checkToken(v *domain.Validation, field, s string) {
 		v.Add(field, domain.ErrRequired)
 		return
 	}
-	v.Check(validToken(s), field, domain.ErrInvalidValue)
+	v.Check(ValidToken(s), field, domain.ErrInvalidValue)
 }
 
-func validToken(s string) bool {
+func ValidToken(s string) bool {
 	if len(s) > maxTokenLength {
 		return false
 	}
@@ -138,6 +138,12 @@ func validToken(s string) bool {
 		}
 	}
 	return true
+}
+
+func ParseID(field, s string) (uuid.UUID, error) {
+	var v domain.Validation
+	id := parseUUID(&v, field, s)
+	return id, v.Err()
 }
 
 func parseUUID(v *domain.Validation, field, s string) uuid.UUID {

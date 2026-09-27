@@ -254,7 +254,10 @@ func TestServerRequiresATokenOutsideHealth(t *testing.T) {
 		{"unknown path without a token", "/admin", "", response{
 			status: http.StatusUnauthorized, challenge: `Bearer realm="wagering"`, code: "UNAUTHENTICATED",
 		}},
-		{"authenticated, no route yet", "/wallets/0192f291-27dd-7d3f-8071-5f8685deef37", valid, response{
+		{"provider on a wallet route", "/wallets/0192f291-27dd-7d3f-8071-5f8685deef37", valid, response{
+			status: http.StatusForbidden, code: "FORBIDDEN",
+		}},
+		{"authenticated, unknown path", "/admin", valid, response{
 			status: http.StatusNotFound, code: "NOT_FOUND",
 		}},
 	}
