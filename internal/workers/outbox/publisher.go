@@ -2,11 +2,18 @@ package outbox
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/fx"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/sqs"
@@ -15,9 +22,13 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/failpoint"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/lifecycle"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/tracing"
 )
 
-const markTimeout = 5 * time.Second
+const (
+	markTimeout = 5 * time.Second
+	traceScope  = "wallet/outbox"
+)
 
 var Module = fx.Module("outbox",
 	fx.Provide(
@@ -94,10 +105,17 @@ func New(cfg config.OutboxConfig, owner string, tx app.TxRunner, sender Sender, 
 func (p *Publisher) Run(ctx context.Context) {
 	ticker := time.NewTicker(p.cfg.PollInterval)
 	defer ticker.Stop()
+	refresh := 10 * p.cfg.PollInterval
+	var observed time.Time
 	for {
 		for p.Tick(ctx) == p.cfg.BatchSize && ctx.Err() == nil {
+			if time.Since(observed) >= refresh {
+				p.Observe(ctx)
+				observed = time.Now()
+			}
 		}
 		p.Observe(ctx)
+		observed = time.Now()
 		select {
 		case <-ctx.Done():
 			return
@@ -135,6 +153,17 @@ type settled struct {
 }
 
 func (p *Publisher) publish(ctx context.Context, chunk []app.OutboxMessage) {
+	links := make([]trace.Link, 0, len(chunk))
+	for _, m := range chunk {
+		origin := otel.GetTextMapPropagator().Extract(context.Background(), propagation.MapCarrier{"traceparent": m.TraceParent})
+		if sc := trace.SpanContextFromContext(origin); sc.IsValid() {
+			links = append(links, trace.Link{SpanContext: sc})
+		}
+	}
+	ctx, span := otel.Tracer(traceScope).Start(ctx, "publish events", trace.WithSpanKind(trace.SpanKindProducer), trace.WithLinks(links...),
+		trace.WithAttributes(semconv.MessagingSystemAWSSQS, semconv.MessagingOperationTypeSend, attribute.Int("messaging.batch.message_count", len(chunk))))
+	defer span.End()
+	ctx = tracing.WithTraceID(ctx)
 	errs := p.sender.PublishEvents(ctx, chunk)
 	failpoint.Hit(failpoint.OutboxAfterPublish)
 	now := p.clock()
@@ -167,8 +196,19 @@ func (p *Publisher) publish(ctx context.Context, chunk []app.OutboxMessage) {
 		return nil
 	})
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		p.log.WarnContext(ctx, "recording publish results failed; the claims expire and the events are retried", "error", err, "events", len(chunk))
 		return
+	}
+	failed := 0
+	for _, e := range errs {
+		if e != nil {
+			failed++
+		}
+	}
+	span.SetAttributes(attribute.Int("wallet.outbox.failed", failed))
+	if failed > 0 {
+		span.SetStatus(codes.Error, fmt.Sprintf("%d of %d events not published", failed, len(chunk)))
 	}
 	for i, s := range done {
 		p.results.WithLabelValues(s.result).Inc()

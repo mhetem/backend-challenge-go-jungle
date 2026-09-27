@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/postgres/database"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
@@ -25,6 +27,9 @@ type outbox struct {
 }
 
 func (r outbox) Insert(ctx context.Context, evs ...events.Event) error {
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	traceParent := nullable(carrier.Get("traceparent"))
 	for _, e := range evs {
 		h := e.EventHeader()
 		payload, err := json.Marshal(e)
@@ -43,6 +48,7 @@ func (r outbox) Insert(ctx context.Context, evs ...events.Event) error {
 			Payload:       payload,
 			OccurredAt:    h.OccurredAt,
 			NextAttemptAt: h.OccurredAt,
+			TraceParent:   traceParent,
 		}); err != nil {
 			return classify(err)
 		}
@@ -72,6 +78,7 @@ func (r outbox) Claim(ctx context.Context, owner string, now, until time.Time, l
 			Payload:       row.Payload,
 			OccurredAt:    row.OccurredAt.UTC(),
 			Attempts:      int(row.Attempts),
+			TraceParent:   value(row.TraceParent),
 		}
 	}
 	slices.SortFunc(msgs, func(a, b app.OutboxMessage) int { return cmp.Compare(a.Seq, b.Seq) })

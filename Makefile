@@ -1,7 +1,7 @@
 -include .env
 export
 
-.PHONY: test test-race vet test-integration test-e2e check generate deps up down run migrate-up migrate-down migrate-status migrate-reset smoke
+.PHONY: test test-race vet test-integration test-e2e check generate deps up down dashboards run migrate-up migrate-down migrate-status migrate-reset smoke load
 
 test:
 	go test ./...
@@ -47,7 +47,10 @@ up:
 	docker compose up --build -d --wait
 
 down:
-	docker compose down -v
+	docker compose --profile observability down -v
+
+dashboards:
+	docker compose --profile observability up -d --wait prometheus grafana
 
 run:
 	go run ./cmd/wallet
@@ -66,3 +69,6 @@ migrate-reset:
 
 smoke:
 	./scripts/smoke.sh
+
+load:
+	@go run ./cmd/loadgen $(LOADGEN_FLAGS)

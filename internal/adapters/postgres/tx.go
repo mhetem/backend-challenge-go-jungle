@@ -9,10 +9,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/postgres/database"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/tracing"
 )
 
 var _ app.TxRunner = (*TxRunner)(nil)
@@ -48,23 +51,28 @@ func (r *TxRunner) Instrument(reg prometheus.Registerer) error {
 }
 
 func (r *TxRunner) InTx(ctx context.Context, fn func(context.Context, app.Store) error) error {
-	return r.run(ctx, r.readWrite, fn)
+	return r.run(ctx, "db transaction", r.readWrite, fn)
 }
 
 func (r *TxRunner) InReadOnlySnapshot(ctx context.Context, fn func(context.Context, app.Store) error) error {
-	return r.run(ctx, r.snapshot, fn)
+	return r.run(ctx, "db snapshot", r.snapshot, fn)
 }
 
-func (r *TxRunner) run(ctx context.Context, opts pgx.TxOptions, fn func(context.Context, app.Store) error) error {
+func (r *TxRunner) run(ctx context.Context, name string, opts pgx.TxOptions, fn func(context.Context, app.Store) error) error {
+	ctx, span := transactionSpan(ctx, name)
 	for attempt := 1; ; attempt++ {
 		err := r.once(ctx, opts, fn)
 		reason := retryReason(err)
 		if err == nil || attempt >= r.attempts || reason == "" {
+			span.SetAttributes(attribute.Int("db.transaction.attempts", attempt))
+			tracing.End(span, err)
 			return err
 		}
 		if sleep(ctx, r.delay(attempt)) != nil {
+			tracing.End(span, err)
 			return err
 		}
+		span.AddEvent("retry", trace.WithAttributes(attribute.String("reason", reason), attribute.Int("attempt", attempt)))
 		if r.retries != nil {
 			r.retries.WithLabelValues(reason).Inc()
 		}

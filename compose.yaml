@@ -16,6 +16,7 @@ x-app: &app
     AWS_ENDPOINT_URL: http://aws:4566
     OIDC_ISSUER: http://localhost:8080/realms/wagering
     OIDC_JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
   depends_on:
     postgres:
       condition: service_healthy
@@ -25,6 +26,8 @@ x-app: &app
       condition: service_completed_successfully
     aws-init:
       condition: service_completed_successfully
+    jaeger:
+      condition: service_healthy
   healthcheck:
     test: ["CMD", "/usr/local/bin/wallet", "healthcheck"]
     interval: 5s
@@ -94,6 +97,17 @@ services:
       timeout: 3s
       retries: 30
 
+  jaeger:
+    image: jaegertracing/jaeger:2.21.0
+    ports:
+      - "16686:16686"
+      - "4318:4318"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:13133/status"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   aws-init:
     image: amazon/aws-cli:2.37.4
     entrypoint: ["/bin/sh", "/provision.sh"]
@@ -139,6 +153,45 @@ services:
     ports:
       - "8083:8080"
       - "9093:9090"
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: ["observability"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/wallet.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
 
 volumes:
   postgres-data:

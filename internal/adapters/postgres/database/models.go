@@ -51,6 +51,7 @@ type OutboxEvent struct {
 	ClaimedUntil  *time.Time
 	PublishedAt   *time.Time
 	LastError     *string
+	TraceParent   *string
 }
 
 type Provider struct {

@@ -13,6 +13,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/config"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/health"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/lifecycle"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
 )
 
 var Module = fx.Module("httpapi",
@@ -61,8 +62,16 @@ func newHandler(checker *health.Checker, authn auth.Authenticator, wallets Walle
 	if err != nil {
 		return nil, err
 	}
+	outcomes := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metrics.Namespace,
+		Name:      "http_wager_outcomes_total",
+		Help:      "Wagers submitted over HTTP by outcome: processed, replayed, pending_reference, rejected or failed.",
+	}, []string{"outcome"})
+	if err := reg.Register(outcomes); err != nil {
+		return nil, err
+	}
 	mux := http.NewServeMux()
 	checker.Register(mux)
-	(&api{wallets: wallets, wagers: wagers, log: log}).routes(mux, protect)
+	(&api{wallets: wallets, wagers: wagers, outcomes: outcomes, log: log}).routes(mux, protect)
 	return instrument(reg, recoverer(log, mux))
 }

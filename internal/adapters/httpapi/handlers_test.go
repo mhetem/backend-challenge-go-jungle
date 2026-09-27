@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/auth"
@@ -169,11 +170,20 @@ type reply struct {
 
 func serve(t *testing.T, wallets *fakeWallets, wagers *fakeWagers, c call) reply {
 	t.Helper()
+	return send(handler(t, wallets, wagers, prometheus.NewRegistry()), c)
+}
+
+func handler(t *testing.T, wallets *fakeWallets, wagers *fakeWagers, reg *prometheus.Registry) http.Handler {
+	t.Helper()
 	discard := slog.New(slog.DiscardHandler)
-	h, err := newHandler(health.NewChecker(nil, discard), tokens{}, wallets, wagers, prometheus.NewRegistry(), discard)
+	h, err := newHandler(health.NewChecker(nil, discard), tokens{}, wallets, wagers, reg, discard)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return h
+}
+
+func send(h http.Handler, c call) reply {
 	req := httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
@@ -271,6 +281,37 @@ func TestSubmitOutcomes(t *testing.T) {
 				t.Fatalf("command = %+v, echoed correlation %q", got, r.header.Get(correlationHeader))
 			}
 		})
+	}
+}
+
+func TestSubmitOutcomesAreCounted(t *testing.T) {
+	results := []app.WagerResult{
+		{Transaction: betSnapshot(t, wager.Processed)},
+		{Transaction: betSnapshot(t, wager.Processed), IdempotentReplay: true},
+		{Transaction: betSnapshot(t, wager.PendingReference)},
+		{Transaction: betSnapshot(t, wager.Rejected)},
+		{Transaction: betSnapshot(t, wager.Rejected), IdempotentReplay: true},
+	}
+	next := 0
+	wagers := &fakeWagers{submit: func(app.SubmitWager) (app.WagerResult, error) {
+		next++
+		return results[next-1], nil
+	}}
+	reg := prometheus.NewRegistry()
+	h := handler(t, &fakeWallets{}, wagers, reg)
+	for range results {
+		send(h, submit(betBody, "provider-a", nil))
+	}
+	want := `
+# HELP wallet_http_wager_outcomes_total Wagers submitted over HTTP by outcome: processed, replayed, pending_reference, rejected or failed.
+# TYPE wallet_http_wager_outcomes_total counter
+wallet_http_wager_outcomes_total{outcome="pending_reference"} 1
+wallet_http_wager_outcomes_total{outcome="processed"} 1
+wallet_http_wager_outcomes_total{outcome="rejected"} 1
+wallet_http_wager_outcomes_total{outcome="replayed"} 2
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "wallet_http_wager_outcomes_total"); err != nil {
+		t.Fatal(err)
 	}
 }
 

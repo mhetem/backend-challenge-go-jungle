@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/auth"
@@ -30,9 +32,10 @@ type Wagers interface {
 }
 
 type api struct {
-	wallets Wallets
-	wagers  Wagers
-	log     *slog.Logger
+	wallets  Wallets
+	wagers   Wagers
+	outcomes *prometheus.CounterVec
+	log      *slog.Logger
 }
 
 func (a *api) routes(mux *http.ServeMux, protect func(http.Handler) http.Handler) {
@@ -202,8 +205,16 @@ func (a *api) submitWager(w http.ResponseWriter, r *http.Request) error {
 	case wager.Failed:
 		status = http.StatusInternalServerError
 	}
+	a.outcomes.WithLabelValues(outcome(result)).Inc()
 	writeJSON(w, status, viewResult(result))
 	return nil
+}
+
+func outcome(r app.WagerResult) string {
+	if r.IdempotentReplay {
+		return "replayed"
+	}
+	return strings.ToLower(string(r.Transaction.Status))
 }
 
 func (a *api) getTransaction(w http.ResponseWriter, r *http.Request) error {

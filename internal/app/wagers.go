@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wager"
@@ -31,6 +32,7 @@ func NewWagerService(tx TxRunner, rules wager.Rules, clock Clock, ids IDs) *Wage
 }
 
 func (s *WagerService) Submit(ctx context.Context, cmd SubmitWager) (WagerResult, error) {
+	ctx, span := startSpan(ctx, "WagerService.Submit", commandAttributes(cmd)...)
 	var result WagerResult
 	err := s.tx.InTx(ctx, func(ctx context.Context, st Store) error {
 		var err error
@@ -38,8 +40,12 @@ func (s *WagerService) Submit(ctx context.Context, cmd SubmitWager) (WagerResult
 		return err
 	})
 	if err != nil {
+		endSpan(span, err)
 		return WagerResult{}, err
 	}
+	span.SetAttributes(transactionAttributes(result.Transaction)...)
+	span.SetAttributes(attribute.Bool("wager.idempotent_replay", result.IdempotentReplay))
+	endSpan(span, nil)
 	if result.Transaction.Status == wager.PendingReference && !result.IdempotentReplay {
 		failpoint.Hit(failpoint.UsecaseAfterPendingReferenceCommit)
 	}

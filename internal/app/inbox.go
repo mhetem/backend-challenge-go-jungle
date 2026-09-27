@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wager"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/failpoint"
@@ -20,6 +21,7 @@ type MessageResult struct {
 }
 
 func (s *WagerService) SubmitMessage(ctx context.Context, consumer, messageID string, cmd SubmitWager) (MessageResult, error) {
+	ctx, span := startSpan(ctx, "WagerService.SubmitMessage", append(commandAttributes(cmd), attribute.String("wager.message_id", messageID))...)
 	var result MessageResult
 	err := s.tx.InTx(ctx, func(ctx context.Context, st Store) error {
 		var err error
@@ -27,8 +29,15 @@ func (s *WagerService) SubmitMessage(ctx context.Context, consumer, messageID st
 		return err
 	})
 	if err != nil {
+		endSpan(span, err)
 		return MessageResult{}, err
 	}
+	span.SetAttributes(
+		attribute.String("wager.transaction_id", result.TransactionID.String()),
+		attribute.String("wager.inbox_outcome", result.Outcome),
+		attribute.Bool("wager.duplicate", result.Duplicate),
+	)
+	endSpan(span, nil)
 	if !result.Duplicate && result.Outcome == string(wager.PendingReference) {
 		failpoint.Hit(failpoint.UsecaseAfterPendingReferenceCommit)
 	}

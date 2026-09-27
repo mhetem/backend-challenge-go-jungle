@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wager"
 )
@@ -25,6 +27,7 @@ func (s *WagerService) Due(ctx context.Context, limit int) ([]DueTransaction, er
 }
 
 func (s *WagerService) Resolve(ctx context.Context, due DueTransaction) (Resolution, error) {
+	ctx, span := startSpan(ctx, "WagerService.Resolve", dueAttributes(due)...)
 	var res Resolution
 	err := s.tx.InTx(ctx, func(ctx context.Context, st Store) error {
 		var err error
@@ -32,8 +35,11 @@ func (s *WagerService) Resolve(ctx context.Context, due DueTransaction) (Resolut
 		return err
 	})
 	if err != nil {
+		endSpan(span, err)
 		return Resolution{}, err
 	}
+	span.SetAttributes(attribute.String("wager.status", string(res.Status)), attribute.Bool("wager.skipped", res.Skipped))
+	endSpan(span, nil)
 	return res, nil
 }
 
@@ -74,11 +80,21 @@ func (s *WagerService) resolve(ctx context.Context, st Store, due DueTransaction
 }
 
 func (s *WagerService) Fail(ctx context.Context, due DueTransaction) (bool, error) {
+	ctx, span := startSpan(ctx, "WagerService.Fail", dueAttributes(due)...)
 	var failed bool
 	err := s.tx.InTx(ctx, func(ctx context.Context, st Store) error {
 		var err error
 		failed, err = st.Transactions().MarkFailed(ctx, due.ID, s.clock())
 		return err
 	})
+	span.SetAttributes(attribute.Bool("wager.failed", failed))
+	endSpan(span, err)
 	return failed, err
+}
+
+func dueAttributes(due DueTransaction) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("wager.transaction_id", due.ID.String()),
+		attribute.String("wager.wallet_id", due.WalletID.String()),
+	}
 }

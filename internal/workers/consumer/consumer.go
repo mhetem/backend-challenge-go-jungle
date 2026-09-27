@@ -14,6 +14,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/fx"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/sqs"
@@ -25,7 +31,10 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/lifecycle"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/logging"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/tracing"
 )
+
+const traceScope = "wallet/consumer"
 
 const (
 	Name          = "wager-transactions"
@@ -184,7 +193,12 @@ func (c *Consumer) Handle(ctx context.Context, batch []sqs.Message) {
 func (c *Consumer) process(ctx context.Context, m sqs.Message) bool {
 	start := time.Now()
 	defer func() { c.latency.Observe(time.Since(start).Seconds()) }()
-	ctx = logging.With(ctx, slog.String("sqsMessageId", m.ID))
+	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(m.Attributes))
+	ctx, span := tracing.Start(ctx, traceScope, "process "+Name, trace.SpanKindConsumer,
+		semconv.MessagingSystemAWSSQS, semconv.MessagingOperationTypeProcess, semconv.MessagingMessageID(m.ID),
+		attribute.String("messaging.consumer.group.name", Name), attribute.Int("messaging.sqs.receive_count", m.ReceiveCount))
+	defer span.End()
+	ctx = logging.With(tracing.WithTraceID(ctx), slog.String("sqsMessageId", m.ID))
 	req, err := decode([]byte(m.Body))
 	if err != nil {
 		return c.deadLetter(ctx, m, err)
@@ -214,6 +228,7 @@ func (c *Consumer) complete(ctx context.Context, m sqs.Message, res app.MessageR
 		outcome = "duplicate"
 	}
 	ctx = logging.With(ctx, slog.String("transactionId", res.TransactionID.String()))
+	trace.SpanFromContext(ctx).SetAttributes(attribute.String("wallet.outcome", outcome))
 	c.messages.WithLabelValues(outcome).Inc()
 	c.log.InfoContext(ctx, "message handled", "outcome", outcome)
 	settle, cancel := settleContext(ctx)
@@ -226,6 +241,9 @@ func (c *Consumer) complete(ctx context.Context, m sqs.Message, res app.MessageR
 
 func (c *Consumer) retry(ctx context.Context, m sqs.Message, cause error) bool {
 	delay := RetryDelay(m.ReceiveCount)
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(attribute.String("wallet.outcome", "retried"))
+	span.SetStatus(codes.Error, cause.Error())
 	c.messages.WithLabelValues("retried").Inc()
 	c.log.WarnContext(ctx, "handling failed transiently; the message comes back after a delay",
 		"error", cause, "receiveCount", m.ReceiveCount, "delay", delay)
@@ -246,9 +264,12 @@ func (c *Consumer) deadLetter(ctx context.Context, m sqs.Message, cause error) b
 	}
 	c.messages.WithLabelValues("dead_lettered").Inc()
 	c.deadLetters.WithLabelValues(reason).Inc()
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(attribute.String("wallet.outcome", "dead_lettered"), attribute.String("wallet.dead_letter_reason", reason))
 	level := slog.LevelWarn
 	if reason == ReasonProcessingFailed {
 		level = slog.LevelError
+		span.SetStatus(codes.Error, cause.Error())
 	}
 	c.log.Log(ctx, level, "message moved to the dead-letter queue", "reason", reason, "error", cause)
 	if err := c.queue.Delete(settle, m); err != nil {

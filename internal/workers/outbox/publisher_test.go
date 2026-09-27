@@ -11,6 +11,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/events"
@@ -34,6 +40,7 @@ type fakeOutbox struct {
 	released map[uuid.UUID]release
 	pending  int64
 	oldest   time.Time
+	midDrain int
 }
 
 func (f *fakeOutbox) Insert(context.Context, ...events.Event) error { return nil }
@@ -61,6 +68,11 @@ func (f *fakeOutbox) Release(_ context.Context, id uuid.UUID, _ string, next tim
 }
 
 func (f *fakeOutbox) Backlog(context.Context) (int64, time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.claims) > 0 {
+		f.midDrain++
+	}
 	return f.pending, f.oldest, nil
 }
 
@@ -82,11 +94,13 @@ func (r runner) InReadOnlySnapshot(ctx context.Context, fn func(context.Context,
 }
 
 type sender struct {
-	fail map[uuid.UUID]error
-	sent int
+	fail  map[uuid.UUID]error
+	sent  int
+	delay time.Duration
 }
 
 func (s *sender) PublishEvents(_ context.Context, msgs []app.OutboxMessage) []error {
+	time.Sleep(s.delay)
 	s.sent += len(msgs)
 	errs := make([]error, len(msgs))
 	for i, m := range msgs {
@@ -226,5 +240,60 @@ func TestRunDrainsFullBatchesAndObservesTheBacklog(t *testing.T) {
 				t.Fatalf("oldest pending age = %v; want 90", v)
 			}
 		}
+	}
+}
+
+func TestBacklogIsObservedWhileDraining(t *testing.T) {
+	var claims [][]app.OutboxMessage
+	for range 40 {
+		claims = append(claims, messages(2, 1))
+	}
+	f := &fakeOutbox{claims: append(claims, messages(1, 1)), markOK: true, pending: 81, oldest: t0.Add(-time.Minute)}
+	p, _ := newPublisher(t, f, &sender{delay: time.Millisecond}, 2)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Run(ctx)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.mu.Lock()
+		left := len(f.claims)
+		f.mu.Unlock()
+		if left == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.midDrain < 2 {
+		t.Fatalf("backlog observed %d times while full batches were still draining; want it refreshed every 10 poll intervals", f.midDrain)
+	}
+}
+
+func TestPublishLinksEachEventToItsOrigin(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
+	msgs := messages(2, 1)
+	msgs[0].TraceParent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	f := &fakeOutbox{claims: [][]app.OutboxMessage{msgs}, markOK: true}
+	p, _ := newPublisher(t, f, &sender{}, 50)
+	p.Tick(t.Context())
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("%d spans; want one per published batch", len(ended))
+	}
+	span := ended[0]
+	links := span.Links()
+	if span.Name() != "publish events" || span.SpanKind() != trace.SpanKindProducer || len(links) != 1 ||
+		links[0].SpanContext.TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" || links[0].SpanContext.SpanID().String() != "00f067aa0ba902b7" {
+		t.Fatalf("span %q (%v) with links %+v; want a producer span linked to the one traced origin", span.Name(), span.SpanKind(), links)
 	}
 }

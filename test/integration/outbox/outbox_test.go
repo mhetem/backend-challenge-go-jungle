@@ -22,6 +22,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/postgres"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/sqs"
@@ -179,10 +182,11 @@ func (h *harness) rows() []row {
 }
 
 type message struct {
-	groupID   string
-	dedupID   string
-	eventType string
-	eventID   string
+	groupID     string
+	dedupID     string
+	eventType   string
+	eventID     string
+	traceParent string
 }
 
 func (h *harness) receive(want int, wait time.Duration) []message {
@@ -206,10 +210,11 @@ func (h *harness) receive(want int, wait time.Duration) []message {
 			}
 			must(h.t, json.Unmarshal([]byte(aws.ToString(m.Body)), &body))
 			got = append(got, message{
-				groupID:   m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)],
-				dedupID:   m.Attributes[string(types.MessageSystemAttributeNameMessageDeduplicationId)],
-				eventType: aws.ToString(m.MessageAttributes["eventType"].StringValue),
-				eventID:   body.EventID,
+				groupID:     m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)],
+				dedupID:     m.Attributes[string(types.MessageSystemAttributeNameMessageDeduplicationId)],
+				eventType:   aws.ToString(m.MessageAttributes["eventType"].StringValue),
+				eventID:     body.EventID,
+				traceParent: aws.ToString(m.MessageAttributes["traceparent"].StringValue),
 			})
 			_, err := h.control.API.DeleteMessage(h.t.Context(), &awssqs.DeleteMessageInput{QueueUrl: aws.String(h.queueURL), ReceiptHandle: m.ReceiptHandle})
 			must(h.t, err)
@@ -429,4 +434,47 @@ func TestRepublishAfterACrashKeepsTheEventID(t *testing.T) {
 		}
 	}
 	h.requireDelivered(rows)
+}
+
+func TestEventsCarryTheTraceOfTheOperationThatCreatedThem(t *testing.T) {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	h := setup(t)
+	tx := h.runner()
+	traceID, err := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	must(t, err)
+	spanID, err := trace.SpanIDFromHex("00f067aa0ba902b7")
+	must(t, err)
+	ctx := trace.ContextWithRemoteSpanContext(t.Context(),
+		trace.NewSpanContext(trace.SpanContextConfig{TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled, Remote: true}))
+	const want = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+	cmd, err := app.OpenWalletRequest{
+		PlayerID:       uuid.NewString(),
+		InitialBalance: app.MoneyRequest{Amount: "100.00", Currency: "BRL"},
+	}.Command("corr-traced")
+	must(t, err)
+	_, err = app.NewWalletService(tx, h.clock.Now, app.NewID, discard, noMetrics{}).Open(ctx, cmd)
+	must(t, err)
+	var stored []string
+	rows, err := h.db.App.Query(t.Context(), `SELECT coalesce(trace_parent, '') FROM outbox_events ORDER BY seq`)
+	must(t, err)
+	for rows.Next() {
+		var tp string
+		must(t, rows.Scan(&tp))
+		stored = append(stored, tp)
+	}
+	must(t, rows.Err())
+	if len(stored) != 2 || stored[0] != want || stored[1] != want {
+		t.Fatalf("stored trace parents %q; want %s on both opening events", stored, want)
+	}
+
+	h.clock.Set(t0.Add(time.Minute))
+	p, _ := h.publisher("traced", tx, h.client(os.Getenv("AWS_ENDPOINT_URL")), 50)
+	if n := p.Tick(t.Context()); n != 2 {
+		t.Fatalf("published %d; want 2", n)
+	}
+	got := h.receive(2, 15*time.Second)
+	if len(got) != 2 || got[0].traceParent != want || got[1].traceParent != want {
+		t.Fatalf("messages %+v; want both carrying traceparent %s", got, want)
+	}
 }

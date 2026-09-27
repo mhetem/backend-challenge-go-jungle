@@ -88,6 +88,7 @@ type OutboxMessage struct {
 	Payload       []byte
 	OccurredAt    time.Time
 	Attempts      int
+	TraceParent   string
 }
 
 type InboxMessage struct {

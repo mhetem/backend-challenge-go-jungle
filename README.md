@@ -10,7 +10,7 @@ As decisões técnicas, os contratos e as limitações estão em [ARCHITECTURE.m
 ## Pré-requisitos
 
 - Docker Engine com Docker Compose v2 (desenvolvido com o Compose 5.4).
-- `make`, `curl` e um shell POSIX.
+- `make`, `curl` e um shell POSIX. `jq` é opcional, só para filtrar logs.
 - Para rodar fora do Docker e para os testes:
   - Go 1.26.8, fixado em `go.mod`. Com um Go mais antigo instalado, `GOTOOLCHAIN=auto` (o
     padrão) baixa a versão certa;
@@ -22,7 +22,8 @@ As decisões técnicas, os contratos e as limitações estão em [ARCHITECTURE.m
   go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
   ```
 - Portas livres no host: 8080 (Keycloak), 4566 (MiniStack), 55432 (PostgreSQL),
-  8081–8083 e 9091–9093 (as três instâncias), 8084 e 9094 (`make run`).
+  8081–8083 e 9091–9093 (as três instâncias), 8084 e 9094 (`make run`), 16686 e 4318
+  (Jaeger), e 3000 e 9090 (Grafana e Prometheus, só com `make dashboards`).
 
 ## Início rápido
 
@@ -32,9 +33,9 @@ docker compose up --build -d --wait     # ou: make up
 ./scripts/smoke.sh                       # ou: make smoke
 ```
 
-O compose sobe PostgreSQL, Keycloak (com o realm importado), MiniStack (SQS e IAM), cria as
-filas (`aws-init`), aplica as migrations (`migrate`) e só então inicia `app-1`, `app-2` e
-`app-3`. `--wait` retorna quando todos estão saudáveis.
+O compose sobe PostgreSQL, Keycloak (com o realm importado), MiniStack (SQS e IAM) e Jaeger
+(traces), cria as filas (`aws-init`), aplica as migrations (`migrate`) e só então inicia
+`app-1`, `app-2` e `app-3`. `--wait` retorna quando todos estão saudáveis.
 
 `scripts/smoke.sh` percorre o fluxo inteiro espalhado pelas três instâncias: abre uma
 carteira, faz `BET`, replay, `WIN`, um `ROLLBACK` que chega antes da sua `BET`, uma `BET`
@@ -62,6 +63,7 @@ dela.
 | `MIGRATE_DATABASE_URL` | `wallet_migrator` em `localhost:55432` | `cmd/migrate` e testes |
 | `DATABASE_URL` | `wallet_app` em `localhost:55432` | Aplicação rodando no host |
 | `KC_BOOTSTRAP_ADMIN_USERNAME`, `KC_BOOTSTRAP_ADMIN_PASSWORD` | `admin` | Console do Keycloak em http://localhost:8080 |
+| `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD` | `admin` | Login de administrador do Grafana; ver os dashboards não exige login |
 | `AWS_REGION` | `us-east-1` | Região do SDK |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `local` | Credenciais do emulador. Não use 12 dígitos: o MiniStack trata isso como outra conta |
 | `AWS_ENDPOINT_URL` | `http://localhost:4566` | Emulador visto do host (os containers usam `http://aws:4566`) |
@@ -121,6 +123,8 @@ processo na inicialização, com todos os problemas listados.
 | `OIDC_ISSUER` | `http://localhost:8080/realms/wagering` | Valor exato de `iss` |
 | `OIDC_JWKS_URL` | issuer + `/protocol/openid-connect/certs` | De onde vêm as chaves (no compose, `http://keycloak:8080/...`) |
 | `OIDC_AUDIENCE` | `wagering-api` | Audiência exigida |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | vazio (tracing desligado) | Coletor OTLP/HTTP dos traces; no compose, `http://jaeger:4318` |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | tudo, respeitando quem chamou | Amostragem, lida pelo SDK do OpenTelemetry |
 
 Só nos testes: `FAILPOINTS` (binário com a tag `failpoints`, ver
 [Simulação de falhas](#simulação-de-falhas)) e `GORACE`, que a suíte e2e define.
@@ -342,11 +346,85 @@ com o motivo no atributo `failureReason`.
 ## Observabilidade
 
 - Logs JSON em stderr: `docker compose logs -f app-1`. Cada linha traz `instanceId` e, quando
-  existem, `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`.
+  existem, `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`. Para
+  seguir uma carteira nas três instâncias (por exemplo, a do `smoke.sh`, que imprime o id no
+  final):
+
+  ```sh
+  docker compose logs --no-log-prefix --since 15m app-1 app-2 app-3 \
+    | jq -cR --arg w "$WALLET" 'fromjson? | select(.walletId == $w)'
+  ```
+
+  Requisições HTTP bem-sucedidas não geram linha de log; só falhas, mensagens do consumer e
+  resultados do resolver geram. O restante do tráfego aparece em `wallet_http_requests_total`,
+  e o `correlationId` de cada transação volta no `GET` dela.
 - Métricas Prometheus na porta admin: `curl -s http://localhost:9091/metrics | grep ^wallet_`.
   A lista completa está em [ARCHITECTURE.md › Observabilidade](ARCHITECTURE.md#observabilidade).
 - `X-Correlation-Id` enviado numa requisição volta na resposta e aparece nos logs e na
   transação gravada.
+
+### Tracing
+
+O Jaeger sobe junto com o stack, e as três instâncias exportam os spans para ele por
+OTLP/HTTP. A interface fica em http://localhost:16686 (serviço `wallet`).
+
+```sh
+curl -s -X POST http://localhost:8081/wagering/transactions \
+  -H "Authorization: Bearer $PROVIDER" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: provider-a:transaction-126' \
+  -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"transaction-126\",\"playerId\":\"$PLAYER\",\"walletId\":\"$WALLET\",\"roundId\":\"round-987\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"5.00\",\"currency\":\"BRL\"}}"
+# depois: http://localhost:16686/trace/4bf92f3577b34da6a3ce929d0e0e4736
+```
+
+- Um trace de envio de wager mostra:
+  - o span do servidor HTTP, com a rota e o status;
+  - o caso de uso (`WagerService.Submit`), com provider, tipo, status e se foi replay;
+  - a transação SQL, com as tentativas e cada retry;
+  - cada query, com o nome da query do sqlc.
+- A publicação dos eventos (`publish events`) aparece como um trace próprio, ligado por
+  *links* aos traces das operações que criaram os eventos.
+- Contexto entre serviços, sempre no formato W3C Trace Context:
+  - uma requisição com o header `traceparent` continua o trace de quem chamou;
+  - uma mensagem SQS com o atributo `traceparent` também, e o span do consumer vira filho do
+    produtor;
+  - cada evento publicado em `wallet-events.fifo` leva no atributo `traceparent` o contexto
+    da operação que o criou, para quem consome os eventos continuar o mesmo trace.
+- Os logs de requisições, mensagens, publicações e do resolver trazem `traceId`, o que liga
+  cada linha ao seu trace.
+- `make run` no host só exporta com `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 make
+  run`. Sem a variável não há exportação, mas o contexto recebido continua sendo propagado.
+- Com `make dashboards`, o Grafana também tem o Jaeger como fonte de dados (Explore).
+
+### Dashboards
+
+```sh
+make up
+make dashboards        # Prometheus e Grafana, pelo perfil observability do compose
+make load              # opcional: gera tráfego para os painéis se mexerem
+```
+
+- Grafana em http://localhost:3000 abre direto o dashboard **Wallet service**, sem login
+  (visualização anônima). Para editar, entre com `GRAFANA_ADMIN_USER` e
+  `GRAFANA_ADMIN_PASSWORD`.
+- Prometheus em http://localhost:9090 lê o `/metrics` das três instâncias a cada 5 s. O
+  label `instance` é `app-1`, `app-2` ou `app-3`.
+- O dashboard e a fonte de dados são provisionados de [deploy/grafana/](deploy/grafana/).
+  Os painéis se agrupam em:
+  - visão geral: instâncias no ar, requisições e 5xx por segundo, backlog da outbox e
+    divergências de reconciliação;
+  - HTTP: requisições por rota, latência do envio de wagers (p50/p95/p99), resultados
+    (inclusive replays), status e falhas de autenticação;
+  - consumer SQS: mensagens por resultado (inclusive duplicatas), latência, DLQ e pausa
+    pelo banco;
+  - outbox: backlog, idade do evento pendente mais antigo e resultados da publicação;
+  - referências pendentes e consistência: resolver, transações repetidas pelo `InTx` e
+    divergências;
+  - runtime: goroutines, memória e CPU por instância.
+- Um filtro no topo escolhe as instâncias.
+- `make down` também derruba o Prometheus e o Grafana. Os dados deles não são guardados.
+- Um teste (`go test ./deploy/`) garante que toda métrica consultada pelo dashboard existe
+  no código.
 
 ## Testes
 
@@ -437,6 +515,135 @@ Durante a pausa do banco, a readiness responde 503, as requisições de negócio
 e os consumers param de receber (`wallet_consumer_paused` 1). Depois da pausa nada se perde,
 e `POST /wallets/{id}/reconciliation` confirma o saldo.
 
+## Teste de carga
+
+`cmd/loadgen` gera carga contra as três instâncias do compose e imprime um relatório em
+Markdown: vazão, latência p50/p95/p99, erros, conflitos, atraso da outbox e reconciliação
+de todas as carteiras usadas.
+
+```sh
+make up
+make load | tee load-report.md                           # 100 req/s por 60 s (open loop)
+make load LOADGEN_FLAGS="-rate 0 -concurrency 64"         # closed loop, vazão máxima
+make load LOADGEN_FLAGS="-hot 0.3 -wallets 10"            # contenção numa carteira
+```
+
+O `make` exporta o `.env`, de onde vêm os segredos dos clients e o `DATABASE_URL`. O
+progresso vai para stderr e o relatório para stdout.
+
+| Flag | Padrão | Uso |
+|---|---|---|
+| `-rate` | `100` | Requisições por segundo em open loop; `0` roda em closed loop |
+| `-concurrency` | `32` | Máximo de requisições em voo |
+| `-duration` | `60s` | Duração da carga |
+| `-wallets` | `50` | Carteiras abertas para o teste, com 1.000.000,00 cada |
+| `-hot` | `0` | Fração das operações novas enviadas a uma única carteira |
+| `-replays` | `0.05` | Fração das requisições que reenviam uma operação anterior, com a mesma chave |
+| `-drain` | `2m` | Espera máxima para a outbox esvaziar depois da carga |
+| `-targets`, `-admin` | portas 8081–8083 e 9091–9093 | Instâncias da API e das métricas |
+| `-issuer`, `-database-url` | `OIDC_ISSUER`, `DATABASE_URL` | Keycloak e banco; sem banco, o atraso da outbox vem só das métricas |
+
+Metodologia:
+- **Carga.**
+  - Cada worker gera operações novas na proporção BET 60%, WIN 25%, LOSS 5%, REFUND 5% e
+    ROLLBACK 5%, com valores de 0,01 a 50,00.
+  - Uma reversão aponta para uma operação que o próprio worker já viu processada, uma única
+    vez, com a mesma carteira, rodada e valor. Sem nenhuma disponível, vira uma BET.
+  - As requisições alternam entre as instâncias.
+- **Open loop** (`-rate` maior que zero, o padrão): as requisições são agendadas em
+  intervalos fixos, e a latência conta desde o horário agendado. Se o serviço atrasa, a
+  fila aparece no p99, em vez de o gerador simplesmente desacelerar (sem *coordinated
+  omission*).
+- **Closed loop** (`-rate 0`): cada worker manda a próxima requisição quando a anterior
+  termina. Mede o tempo de serviço na vazão máxima.
+- **Medições.**
+  - Latência e vazão são medidas no cliente e incluem todas as requisições, também as que
+    falharam.
+  - Erros são falhas de transporte, 503 e respostas inesperadas. Rejeições de negócio e
+    replays são resultados, não erros.
+  - Conflitos: transações repetidas pelo `InTx` por motivo
+    (`wallet_db_transaction_retries_total`), respostas 409 e claims da outbox perdidos para
+    outra instância. Os contadores são a diferença do `/metrics` antes e depois, somada nas
+    três instâncias.
+  - Atraso da outbox: `published_at − occurred_at` de cada evento criado durante a carga,
+    lido do banco (p50, p95, p99 e máximo). Também o maior backlog e o evento pendente mais
+    antigo, amostrados a cada segundo, e o tempo até a outbox esvaziar depois da carga.
+  - No fim, todas as carteiras do teste passam pela reconciliação. O comando sai com código
+    1 se alguma divergir.
+
+Limitações do ambiente local:
+- O gerador e o stack dividem a mesma máquina, então disputam CPU.
+- O MiniStack reconstrói o cache de deduplicação FIFO a cada mensagem que recebe, e cada
+  envio custa O(mensagens dos últimos 5 minutos). Com muitos eventos por segundo o emulador
+  vira o gargalo da publicação: o atraso da outbox medido localmente é um teto, não o
+  esperado na AWS. Entre execuções pesadas, espere 5 minutos ou recrie as filas com
+  `docker compose up -d --force-recreate aws && docker compose run --rm aws-init`.
+- Ninguém consome `wallet-events.fifo` localmente, então os eventos se acumulam até
+  `make down`.
+- O gerador conta o backlog no banco uma vez por segundo durante a carga. Com uma outbox
+  muito cheia, essa contagem também pesa no PostgreSQL.
+- É um único PostgreSQL com a configuração padrão do container. Os números servem para
+  comparar versões do serviço, não para dimensionar produção.
+
+### Resultados de referência
+
+Executados em 2026-09-27 contra o stack do compose (três instâncias), com o gerador na mesma
+máquina: AMD Ryzen 5 5600G (12 threads), 15,6 GiB de RAM, Linux no WSL2, Go 1.26.8. Os
+relatórios completos estão em [docs/load-tests/](docs/load-tests/).
+
+| | Open loop, 100 req/s | Closed loop, 64 em voo |
+|---|---:|---:|
+| Requisições em 60 s | 6.000 | 101.664 |
+| Vazão | 100,0 req/s | 1.692,1 req/s |
+| Erros | 0 | 0 |
+| Latência p50 / p95 / p99 | 5,6 / 12,3 / 22,4 ms | 33,3 / 80,8 / 117,4 ms |
+| Latência máxima | 42,0 ms | 355,3 ms |
+| Replays respondidos | 305 | 5.052 |
+| Transações repetidas pelo `InTx`, respostas 409, claims perdidos | 0, 0, 0 | 0, 0, 0 |
+| Maior backlog da outbox | 72 eventos | 181.293 eventos |
+| Commit até publicação, p50 / p99 | 0,19 / 0,36 s | 78,4 / 170,2 s |
+| Outbox depois da carga | vazia em 0,3 s | 165.875 eventos pendentes após 2 min |
+| Reconciliação | 50 de 50 carteiras | 50 de 50 carteiras |
+
+Leitura:
+- A 100 req/s o serviço responde em cerca de 5 ms (p50 de 5,6 ms). O p99 de 22 ms já inclui
+  qualquer espera na fila, porque o teste é open loop. A outbox publica cada evento em menos
+  de meio segundo e esvazia logo depois da carga.
+- A cauda do open loop variou entre execuções com a mesma carga. O p50 ficou entre 5,2 e 5,6
+  ms nas três, mas o p95/p99 foi 7,1/9,1 ms e 6,5/8,2 ms nas duas primeiras e 12,3/22,4 ms
+  nesta. Entre elas mudaram só a migration `00010` (um índice parcial da outbox trocado por
+  outro com o mesmo predicado) e a frequência dos gauges. A diferença não foi investigada,
+  e cada configuração rodou uma única vez numa máquina de desenvolvimento.
+- Em closed loop as três instâncias processaram 1.692 req/s sem erro e sem conflito, e todas
+  as carteiras fecharam na reconciliação. A latência sobe porque 64 requisições disputam 50
+  carteiras e um único PostgreSQL. Requisições concorrentes na mesma carteira esperam o lock
+  da carteira em vez de falhar, e nenhuma esperou mais que o `lock_timeout` de 2 s.
+- Na carga máxima, a publicação ficou presa no emulador. Medido durante as drenagens, o
+  container `aws` ficou entre 100% e 110% de CPU (Python numa thread), com as instâncias
+  entre 1% e 4% e o PostgreSQL em cerca de 6%, publicando de 85 a 95 eventos por segundo. É o custo O(n) da deduplicação
+  do MiniStack descrito acima. Os eventos esperam na outbox, nada se perde, e a publicação
+  continua depois da carga.
+
+Problemas que o teste de carga encontrou, já corrigidos:
+- **Gauges da outbox congelados.** `wallet_outbox_pending` e
+  `wallet_outbox_oldest_pending_age_seconds` só eram atualizados quando o publisher terminava
+  de drenar, então congelavam justamente com a outbox cheia: numa primeira execução, as
+  instâncias mostravam 0, 0 e 28 com mais de 140 mil eventos pendentes. Agora o publisher os
+  atualiza durante a drenagem, e o gerador lê o backlog direto do banco.
+- **Claim percorrendo o histórico.** Um `EXPLAIN` durante a drenagem mostrou o claim andando
+  pelo índice de `seq` e descartando 44 mil linhas já publicadas para achar 50 pendentes
+  (32 ms por claim, crescendo com o histórico, que nunca é apagado). A migration `00010` cria
+  um índice parcial em `seq` só das linhas pendentes, e remove o índice em `next_attempt_at`,
+  que nenhuma query usava. Na drenagem desta execução, com 162 mil pendentes, o claim
+  descartou 90 linhas (as que estavam em claim) e levou 0,4 ms. A busca do evento pendente
+  mais antigo caiu de 35 ms para 0,1 ms.
+- **Custo da própria correção.** A primeira versão atualizava os gauges a cada
+  `OUTBOX_POLL_INTERVAL`. Com 150 mil pendentes, cada contagem virava uma varredura de 35 ms
+  e o PostgreSQL chegou a 26% de CPU só com isso. Agora a atualização durante drenagens é a
+  cada 10 intervalos (5 s), e o PostgreSQL voltou a cerca de 6% na mesma situação.
+
+Os números da tabela são da terceira execução, já com as três correções.
+
 ## Estrutura
 
 ```
@@ -446,10 +653,11 @@ internal/domain        Money, Wallet, WagerTransaction, ledger, regras e eventos
 internal/app           casos de uso, portas, comandos e hash do payload
 internal/adapters      postgres (pgx + sqlc), sqs, httpapi, oidc
 internal/workers       consumer, outbox, resolver
-internal/platform      config, logging, metrics, health, lifecycle, failpoint
+internal/platform      config, logging, metrics, tracing, health, lifecycle, failpoint
 internal/bootstrap     composição Fx
 migrations             SQL do goose
-deploy                 papéis do PostgreSQL, realm do Keycloak, provisionamento das filas
+deploy                 papéis do PostgreSQL, realm do Keycloak, filas, Prometheus e Grafana
+cmd/loadgen            gerador de carga (make load)
 scripts                get-token.sh, send-wager.sh, smoke.sh
 test/integration       testes com a tag integration
 test/e2e               testes com várias instâncias e failpoints

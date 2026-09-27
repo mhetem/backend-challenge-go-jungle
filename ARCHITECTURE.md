@@ -386,6 +386,9 @@ Outbox:
      SKIP LOCKED)`, pegando os eventos não publicados, vencidos e sem lease válido, em ordem
      de `seq`.
      - Vários publishers disputam a tabela sem se bloquear e recebem conjuntos disjuntos.
+     - Um índice parcial em `seq`, só das linhas não publicadas (`outbox_events_pending`),
+       faz o claim ler apenas a cabeça da fila. O custo não cresce com o histórico já
+       publicado, que a aplicação não apaga.
      - O dono do claim é o id da instância mais um UUID gerado a cada processo. Uma instância
        reiniciada não confunde claims antigos com seus.
   2. **Publicação**, fora da transação, com `SendMessageBatch` de até 10 mensagens.
@@ -411,6 +414,11 @@ Outbox:
   - `wallet_outbox_publish_attempts` (histograma);
   - `wallet_outbox_pending`;
   - `wallet_outbox_oldest_pending_age_seconds`.
+
+  Os dois gauges são atualizados a cada ciclo e, durante uma drenagem longa, a cada 10 ×
+  `OUTBOX_POLL_INTERVAL` (5 s por padrão), para refletirem o backlog justamente quando ele
+  cresce. Contar o backlog custa O(eventos pendentes), por isso a atualização não é mais
+  frequente.
 - Retenção e limpeza da outbox ficam fora do escopo, e o papel da aplicação não apaga linhas.
 
 ## Contratos SQS
@@ -425,6 +433,10 @@ Entrada: `wager-transactions.fifo`, com DLQ `wager-transactions-dlq.fifo`.
 | `data` | O mesmo contrato do corpo de `POST /wagering/transactions`, mais `idempotencyKey` |
 
 Campos desconhecidos são recusados, no envelope e no `data`, como no HTTP.
+
+O atributo de mensagem `traceparent` (W3C Trace Context) é opcional. Quando vem, o
+processamento da mensagem continua o trace do produtor, e uma mensagem mandada para a DLQ
+leva o atributo junto.
 
 Produção:
 
@@ -529,6 +541,7 @@ Roteamento: todo evento vai para `wallet-events.fifo` (DLQ `wallet-events-dlq.fi
 | Atributo `eventType` | Tipo do evento, para filtrar sem abrir o corpo |
 | Atributo `eventVersion` | Versão do contrato do evento |
 | Atributo `correlationId` | Correlação da operação de origem |
+| Atributo `traceparent` | Contexto W3C da operação de origem, quando ela foi rastreada |
 
 - Consumidores devem deduplicar pelo `eventId` e ordenar `WalletBalanceChanged` por
   `walletVersion`. Publishers concorrentes podem entregar eventos da mesma carteira fora de
@@ -674,6 +687,24 @@ Todas as filas são FIFO, com `ContentBasedDeduplication=false` e `VisibilityTim
 
 O script é idempotente e pode rodar de novo a qualquer momento.
 
+Credenciais por componente:
+- Na AWS, cada componente roda com o seu próprio papel IAM, com a policy correspondente e sem
+  chaves estáticas compartilhadas:
+  - as instâncias do serviço, como `wallet-service`;
+  - os providers que enviam wagers, como `provider-producer`;
+  - quem consome os eventos, como `events-reader`.
+- A policy de `wallet-service` cobre exatamente as chamadas que o serviço faz:
+  - na fila de entrada, `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` e
+    `GetQueueAttributes` (readiness);
+  - `SendMessage` na DLQ da entrada (mensagens recusadas) e em `wallet-events.fifo` (o
+    `SendMessageBatch` da outbox usa a permissão `sqs:SendMessage`);
+  - `GetQueueUrl` nas três filas, na inicialização.
+- Localmente, todos os componentes (instâncias, `send-wager.sh`, `smoke.sh` e testes) usam a
+  mesma credencial do `.env`, e o MiniStack não aplica as policies. A separação por papel não
+  é verificada aqui (ver *Trabalho não concluído*).
+- O consumer não depende do broker para saber quem enviou: o provider do envelope é
+  validado contra o banco, e todas as validações de domínio valem como no HTTP.
+
 ## Emulador AWS local
 
 SQS e IAM locais rodam no [MiniStack](https://github.com/ministackorg/ministack), fixado em
@@ -712,6 +743,7 @@ abre conexão nem inicia goroutine. Cada módulo registra os seus hooks num úni
 | Módulo | Fornece | Hooks |
 |---|---|---|
 | `logging` | `*slog.Logger` JSON, com os atributos do contexto | — |
+| `tracing` | propagador W3C Trace Context e, com `OTEL_EXPORTER_OTLP_ENDPOINT`, o SDK do OpenTelemetry | start: exportador OTLP/HTTP; stop, por último: descarrega os spans pendentes |
 | `health` | `*health.Checker`, que agrega os checks do grupo `health.checks` | — |
 | `postgres` | `*pgxpool.Pool`, `app.TxRunner`, check `postgres` | start: ping com retry; stop: fecha o pool |
 | `sqs` | cliente SQS, check `sqs` | start: resolve as URLs das filas com retry; stop: fecha conexões ociosas |
@@ -760,6 +792,7 @@ Sequência:
 |---|---|---|
 | `wallet_http_requests_total` | counter `{method,route,status}` | Resultados por status no HTTP |
 | `wallet_http_request_duration_seconds` | histograma `{method,route}` | Latência do HTTP |
+| `wallet_http_wager_outcomes_total` | counter `{outcome=processed\|replayed\|pending_reference\|rejected\|failed}` | Resultados das operações enviadas por HTTP, inclusive replays (duplicatas) |
 | `wallet_auth_failures_total` | counter `{reason=missing\|invalid\|unavailable}` | Falhas de autenticação |
 | `wallet_consumer_messages_total` | counter `{outcome}` | Resultados por status no SQS, duplicatas (`duplicate`), replays, retries (`retried`) e DLQ (`dead_lettered`) |
 | `wallet_consumer_dead_letters_total` | counter `{reason}` | Mensagens na DLQ por motivo |
@@ -772,6 +805,41 @@ Sequência:
 | `wallet_outbox_oldest_pending_age_seconds` | gauge | Atraso da outbox |
 | `wallet_resolver_outcomes_total` | counter `{outcome}` | Resultado de cada tentativa de resolver uma referência pendente |
 | `wallet_reconciliation_divergences_total` | counter | Divergências de reconciliação |
+- Tracing com OpenTelemetry, exportado por OTLP/HTTP ao Jaeger do compose:
+  - Spans:
+    - HTTP: um span de servidor por requisição, com o nome da rota;
+    - casos de uso: `WagerService.Submit`, `.SubmitMessage`, `.Resolve`, `.Fail`,
+      `WalletService.Open` e `.Reconcile`;
+    - banco: um span por transação (tentativas e cada retry, com o motivo) e um por query,
+      com o nome da query do sqlc;
+    - consumer: um span por mensagem;
+    - publisher: um span por lote publicado;
+    - resolver: um span por referência pendente tentada.
+  - A instrumentação é própria, sobre a API do OpenTelemetry: um middleware HTTP, um
+    `QueryTracer` do pgx e spans nos workers. Não usa as bibliotecas contrib,
+    e o `app` depende só da API, nunca do SDK ou do Fx.
+  - Spans de banco só nascem dentro de um span que está gravando. Os ciclos ociosos do
+    publisher e do resolver não geram traces soltos.
+  - Os atributos têm ids, tipo, status e resultado, nunca valores monetários.
+  - Rejeições e conflitos de negócio ficam registrados no span sem marcá-lo como erro. Falhas
+    transitórias e permanentes, e respostas 5xx, marcam.
+  - Contexto:
+    - Entra pelo header `traceparent` no HTTP e pelo atributo `traceparent` no SQS.
+    - Atravessa a outbox: cada evento guarda o `traceparent` da operação que o criou (coluna
+      `trace_parent`, imutável como o resto do envelope e validada por um `CHECK`).
+    - O span de publicação tem *links* para essas origens, e cada mensagem em
+      `wallet-events.fifo` leva o contexto da sua origem.
+    - O publisher roda em outro momento e em lote, então liga origens em vez de ser filho de
+      uma delas.
+  - Os logs das bordas (HTTP, consumer, publisher e resolver) trazem `traceId`.
+  - Sem `OTEL_EXPORTER_OTLP_ENDPOINT` não há SDK nem exportação. O propagador continua
+    ativo, então um contexto recebido ainda chega à outbox e aos eventos. A amostragem segue
+    `OTEL_TRACES_SAMPLER`.
+- Dashboards: o perfil `observability` do compose sobe Prometheus (lendo as três instâncias a
+  cada 5 s) e Grafana com o dashboard **Wallet service** provisionado de arquivo. Ele cobre
+  todas as métricas da tabela acima, com filtro por instância. Um teste confere que toda
+  métrica consultada pelo dashboard existe no código, para que ele não fique mostrando "No
+  data" depois de um rename.
 - Health checks:
   - `/health/live` responde 200 enquanto o processo está de pé;
   - `/health/ready` testa PostgreSQL (`ping`) e SQS (`GetQueueAttributes` na fila de
@@ -827,8 +895,7 @@ Suíte e2e (`test/e2e`, tag `e2e`):
 - A referência de um `WIN` é opcional e não tem regra de valor: um prêmio não precisa ser
   igual à aposta.
 - Um token com `kid` desconhecido força uma busca no JWKS. A biblioteca junta buscas
-  simultâneas, mas não limita a frequência. Um limite por intervalo fica como trabalho
-  pendente.
+  simultâneas, mas não limita a frequência.
 - Tokens revogados continuam aceitos até expirar (validação local, sem introspecção).
 - Um long poll interrompido pelo shutdown pode já ter reservado mensagens que a instância
   nunca vê. Elas voltam quando a visibilidade expira (30 s), com um recebimento a mais.
@@ -842,3 +909,20 @@ Suíte e2e (`test/e2e`, tag `e2e`):
   bloqueado em vez de falhar e recuar; quando o lease vence, outra instância assume os mesmos
   eventos, e a deduplicação FIFO descarta o envio repetido. Nada se perde, mas o backoff da
   outbox só age em erros, não em chamadas travadas.
+
+### Trabalho não concluído
+
+- **Diferenciais opcionais do desafio.** O ledger de partidas dobradas não foi
+  implementado. O teste de carga, os dashboards e o tracing, os outros diferenciais, estão
+  no README.
+- **Credenciais do broker por componente.** As policies por papel são provisionadas, mas
+  localmente todos os componentes usam a mesma credencial e o MiniStack não aplica IAM.
+  Falta rodar cada componente com o seu papel e verificar as policies numa AWS real.
+- **Retenção da outbox e da inbox.** `outbox_events` e `inbox_messages` crescem para
+  sempre, e o papel da aplicação não pode apagar linhas. O índice parcial evita que o claim
+  fique mais lento com o histórico, mas o disco continua crescendo. Falta um job de
+  retenção com um papel próprio, ou particionamento por tempo.
+- **Limite para buscas de JWKS.** Um `kid` desconhecido sempre dispara uma busca. Falta um
+  intervalo mínimo entre buscas.
+- **Cauda do teste de carga.** O p99 do open loop variou de 8 a 22 ms entre execuções com a
+  mesma carga, e a causa não foi investigada (ver README).

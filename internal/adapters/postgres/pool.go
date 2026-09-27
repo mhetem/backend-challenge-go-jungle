@@ -24,5 +24,6 @@ func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	}
 	pc.MaxConns = cfg.MaxConns
 	pc.ConnConfig.RuntimeParams["application_name"] = cfg.ApplicationName
+	pc.ConnConfig.Tracer = queryTracer{}
 	return pgxpool.NewWithConfig(ctx, pc)
 }

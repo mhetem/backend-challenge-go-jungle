@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/ledger"
@@ -49,7 +50,14 @@ func NewWalletService(tx TxRunner, clock Clock, ids IDs, log *slog.Logger, metri
 	return &WalletService{tx: tx, clock: clock, ids: ids, log: log, metrics: metrics}
 }
 
-func (s *WalletService) Open(ctx context.Context, cmd OpenWallet) (wallet.Snapshot, error) {
+func (s *WalletService) Open(ctx context.Context, cmd OpenWallet) (snapshot wallet.Snapshot, err error) {
+	ctx, span := startSpan(ctx, "WalletService.Open")
+	defer func() {
+		if snapshot.ID != uuid.Nil {
+			span.SetAttributes(attribute.String("wallet.id", snapshot.ID.String()))
+		}
+		endSpan(span, err)
+	}()
 	opened, err := wager.Open(s.ids(), cmd.PlayerID, cmd.InitialBalance, cmd.CorrelationID, s.clock())
 	if err != nil {
 		return wallet.Snapshot{}, err
@@ -136,10 +144,15 @@ func (s *WalletService) Ledger(ctx context.Context, walletID uuid.UUID, cursor s
 	return page, nil
 }
 
-func (s *WalletService) Reconcile(ctx context.Context, walletID uuid.UUID) (Reconciliation, error) {
+func (s *WalletService) Reconcile(ctx context.Context, walletID uuid.UUID) (result Reconciliation, err error) {
+	ctx, span := startSpan(ctx, "WalletService.Reconcile", attribute.String("wallet.id", walletID.String()))
+	defer func() {
+		span.SetAttributes(attribute.Bool("wallet.consistent", result.Consistent))
+		endSpan(span, err)
+	}()
 	var w *wallet.Wallet
 	var summary LedgerSummary
-	err := s.tx.InReadOnlySnapshot(ctx, func(ctx context.Context, st Store) error {
+	err = s.tx.InReadOnlySnapshot(ctx, func(ctx context.Context, st Store) error {
 		var err error
 		if w, err = st.Wallets().Get(ctx, walletID); err != nil {
 			return err

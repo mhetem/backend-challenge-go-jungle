@@ -16,6 +16,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/health"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/logging"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/tracing"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/workers/consumer"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/workers/outbox"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/workers/resolver"
@@ -28,6 +29,7 @@ func Options(cfg config.Config) fx.Option {
 		fx.StopTimeout(cfg.ShutdownTimeout),
 		fx.WithLogger(logging.FxLogger),
 		logging.Module,
+		tracing.Module,
 		health.Module,
 		postgres.Module,
 		sqs.Module,

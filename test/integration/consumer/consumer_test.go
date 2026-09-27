@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/postgres"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/sqs"
@@ -533,4 +535,25 @@ func TestStopFinishesTheInFlightMessageAndReleasesTheRest(t *testing.T) {
 		t.Fatalf("inbox %+v, %d debits, balance %s; want five messages, five debits and 50.00", got, h.debits(), h.balance())
 	}
 	h.requireInputEmpty()
+}
+
+func TestTheProducersTraceReachesTheEvents(t *testing.T) {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	h := setup(t, 10, 2*time.Second)
+	const traceParent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	h.queues.SendWith(h.envelope(wagerMessage{id: "msg-1", kind: "BET", extID: "bet-1", amount: "25.00"}), h.w.ID.String(), "dedup-1",
+		map[string]string{"traceparent": traceParent})
+
+	c, reg := h.consumer(h.wagers)
+	stop := h.run(c)
+	eventually(t, 15*time.Second, "the message", func() bool { return settled(reg) == 1 })
+	stop()
+
+	var traced int
+	must(t, h.db.App.QueryRow(t.Context(), `SELECT count(*) FROM outbox_events o JOIN wager_transactions w ON o.aggregate_id IN (w.id, w.wallet_id)
+		WHERE w.external_transaction_id = 'bet-1' AND o.occurred_at >= w.created_at
+		AND split_part(o.trace_parent, '-', 2) = '4bf92f3577b34da6a3ce929d0e0e4736'`).Scan(&traced))
+	if traced != 2 {
+		t.Fatalf("%d of the bet's events carry the producer's trace; want both (processed and balance changed)", traced)
+	}
 }

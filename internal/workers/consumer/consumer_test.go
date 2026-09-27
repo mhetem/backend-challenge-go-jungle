@@ -15,6 +15,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/sqs"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
@@ -476,5 +483,39 @@ func TestRetryDelay(t *testing.T) {
 		if got := consumer.RetryDelay(count); got != want {
 			t.Errorf("RetryDelay(%d) = %s; want %s", count, got, want)
 		}
+	}
+}
+
+func TestMessagesContinueTheProducersTrace(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
+	q := &fakeQueue{}
+	c, _ := newConsumer(t, q, &fakeService{}, nil)
+	traced := message("m-1", "g1", body("m-1", nil), 1)
+	traced.Attributes = map[string]string{"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+	c.Handle(t.Context(), []sqs.Message{traced, message("m-2", "g2", "not json", 1)})
+
+	ended := recorder.Ended()
+	if len(ended) != 2 {
+		t.Fatalf("%d spans; want one per message", len(ended))
+	}
+	attributes := func(s sdktrace.ReadOnlySpan) map[string]string {
+		out := map[string]string{}
+		for _, kv := range s.Attributes() {
+			out[string(kv.Key)] = kv.Value.String()
+		}
+		return out
+	}
+	processed, malformed := ended[0], ended[1]
+	if a := attributes(processed); processed.Name() != "process wager-transactions" || processed.SpanKind() != trace.SpanKindConsumer ||
+		processed.SpanContext().TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" || processed.Parent().SpanID().String() != "00f067aa0ba902b7" ||
+		a["wallet.outcome"] != "processed" || a["messaging.message.id"] != "sqs-m-1" || a["messaging.system"] != "aws_sqs" {
+		t.Fatalf("span %q in trace %s with %v; want a consumer span continuing the producer's trace", processed.Name(), processed.SpanContext().TraceID(), a)
+	}
+	if a := attributes(malformed); malformed.Parent().IsValid() || a["wallet.outcome"] != "dead_lettered" ||
+		a["wallet.dead_letter_reason"] != consumer.ReasonMalformed || malformed.Status().Code != codes.Unset {
+		t.Fatalf("span with parent %v, %v, %v; want a root span, dead-lettered as malformed, not an error", malformed.Parent(), a, malformed.Status())
 	}
 }

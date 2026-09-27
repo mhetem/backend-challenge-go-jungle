@@ -24,7 +24,7 @@ WHERE id IN (
     LIMIT $4
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, seq, aggregate_type, aggregate_id, partition_key, event_type, event_version, correlation_id, causation_id, payload, occurred_at, attempts, next_attempt_at, claimed_by, claimed_until, published_at, last_error
+RETURNING id, seq, aggregate_type, aggregate_id, partition_key, event_type, event_version, correlation_id, causation_id, payload, occurred_at, attempts, next_attempt_at, claimed_by, claimed_until, published_at, last_error, trace_parent
 `
 
 type ClaimOutboxEventsParams struct {
@@ -66,6 +66,7 @@ func (q *Queries) ClaimOutboxEvents(ctx context.Context, arg ClaimOutboxEventsPa
 			&i.ClaimedUntil,
 			&i.PublishedAt,
 			&i.LastError,
+			&i.TraceParent,
 		); err != nil {
 			return nil, err
 		}
@@ -91,8 +92,8 @@ func (q *Queries) CountPendingOutboxEvents(ctx context.Context) (int64, error) {
 const insertOutboxEvent = `-- name: InsertOutboxEvent :exec
 INSERT INTO outbox_events (
     id, aggregate_type, aggregate_id, partition_key, event_type, event_version,
-    correlation_id, causation_id, payload, occurred_at, next_attempt_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    correlation_id, causation_id, payload, occurred_at, next_attempt_at, trace_parent
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 `
 
 type InsertOutboxEventParams struct {
@@ -107,6 +108,7 @@ type InsertOutboxEventParams struct {
 	Payload       []byte
 	OccurredAt    time.Time
 	NextAttemptAt time.Time
+	TraceParent   *string
 }
 
 func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) error {
@@ -122,6 +124,7 @@ func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventPa
 		arg.Payload,
 		arg.OccurredAt,
 		arg.NextAttemptAt,
+		arg.TraceParent,
 	)
 	return err
 }

@@ -21,16 +21,20 @@ func (c *Client) PublishEvents(ctx context.Context, msgs []app.OutboxMessage) []
 	errs := make([]error, len(msgs))
 	entries := make([]types.SendMessageBatchRequestEntry, len(msgs))
 	for i, m := range msgs {
+		attrs := map[string]types.MessageAttributeValue{
+			"eventType":     {DataType: aws.String("String"), StringValue: aws.String(m.EventType)},
+			"eventVersion":  {DataType: aws.String("Number"), StringValue: aws.String(strconv.Itoa(m.EventVersion))},
+			"correlationId": {DataType: aws.String("String"), StringValue: aws.String(m.CorrelationID)},
+		}
+		if m.TraceParent != "" {
+			attrs["traceparent"] = types.MessageAttributeValue{DataType: aws.String("String"), StringValue: aws.String(m.TraceParent)}
+		}
 		entries[i] = types.SendMessageBatchRequestEntry{
 			Id:                     aws.String(strconv.Itoa(i)),
 			MessageBody:            aws.String(string(m.Payload)),
 			MessageGroupId:         aws.String(m.PartitionKey.String()),
 			MessageDeduplicationId: aws.String(m.ID.String()),
-			MessageAttributes: map[string]types.MessageAttributeValue{
-				"eventType":     {DataType: aws.String("String"), StringValue: aws.String(m.EventType)},
-				"eventVersion":  {DataType: aws.String("Number"), StringValue: aws.String(strconv.Itoa(m.EventVersion))},
-				"correlationId": {DataType: aws.String("String"), StringValue: aws.String(m.CorrelationID)},
-			},
+			MessageAttributes:      attrs,
 		}
 	}
 	out, err := c.API.SendMessageBatch(ctx, &awssqs.SendMessageBatchInput{QueueUrl: aws.String(c.urls.Events), Entries: entries})

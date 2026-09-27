@@ -40,6 +40,11 @@ type Config struct {
 	Resolver         ResolverConfig
 	Outbox           OutboxConfig
 	Consumer         ConsumerConfig
+	Tracing          Tracing
+}
+
+type Tracing struct {
+	Endpoint string
 }
 
 type Database struct {
@@ -155,6 +160,9 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 			WaitTime:       e.duration("CONSUMER_WAIT_TIME", 20*time.Second),
 			MessageTimeout: e.duration("CONSUMER_MESSAGE_TIMEOUT", 10*time.Second),
 		},
+		Tracing: Tracing{
+			Endpoint: strings.TrimSuffix(e.optionalLink("OTEL_EXPORTER_OTLP_ENDPOINT", "http", "https"), "/"),
+		},
 	}
 	cfg.OIDC.JWKSURL = e.link("OIDC_JWKS_URL", strings.TrimSuffix(cfg.OIDC.Issuer, "/")+"/protocol/openid-connect/certs", "http", "https")
 	if v := cfg.SQS.VisibilityTimeout; v%time.Second != 0 || v > 12*time.Hour {
@@ -204,6 +212,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("eventsQueue", c.SQS.EventsQueue),
 		slog.String("oidcIssuer", c.OIDC.Issuer),
 		slog.String("oidcJwksUrl", c.OIDC.JWKSURL),
+		slog.String("otlpEndpoint", c.Tracing.Endpoint),
 	)
 }
 

@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/fx"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
@@ -17,7 +19,10 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/lifecycle"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/logging"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/tracing"
 )
+
+const traceScope = "wallet/resolver"
 
 var Module = fx.Module("resolver",
 	fx.Provide(
@@ -109,7 +114,10 @@ func (r *Resolver) Tick(ctx context.Context) {
 }
 
 func (r *Resolver) resolve(ctx context.Context, d app.DueTransaction) {
-	ctx = logging.With(ctx, slog.String("transactionId", d.ID.String()), slog.String("walletId", d.WalletID.String()))
+	ctx, span := tracing.Start(ctx, traceScope, "resolve pending reference", trace.SpanKindInternal,
+		attribute.String("wager.transaction_id", d.ID.String()), attribute.String("wager.wallet_id", d.WalletID.String()))
+	defer span.End()
+	ctx = logging.With(tracing.WithTraceID(ctx), slog.String("transactionId", d.ID.String()), slog.String("walletId", d.WalletID.String()))
 	res, err := r.service.Resolve(ctx, d)
 	switch {
 	case err == nil:

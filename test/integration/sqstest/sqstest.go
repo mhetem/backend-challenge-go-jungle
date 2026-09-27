@@ -84,11 +84,24 @@ func (q *Queues) attribute(url string, name types.QueueAttributeName) string {
 
 func (q *Queues) Send(body, group, dedup string) {
 	q.t.Helper()
+	q.SendWith(body, group, dedup, nil)
+}
+
+func (q *Queues) SendWith(body, group, dedup string, attributes map[string]string) {
+	q.t.Helper()
+	var attrs map[string]types.MessageAttributeValue
+	for name, v := range attributes {
+		if attrs == nil {
+			attrs = map[string]types.MessageAttributeValue{}
+		}
+		attrs[name] = types.MessageAttributeValue{DataType: aws.String("String"), StringValue: aws.String(v)}
+	}
 	_, err := q.API.SendMessage(context.Background(), &awssqs.SendMessageInput{
 		QueueUrl:               aws.String(q.InputURL),
 		MessageBody:            aws.String(body),
 		MessageGroupId:         aws.String(group),
 		MessageDeduplicationId: aws.String(dedup),
+		MessageAttributes:      attrs,
 	})
 	if err != nil {
 		q.t.Fatalf("send %s: %v", dedup, err)

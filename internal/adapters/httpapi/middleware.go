@@ -8,9 +8,17 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/tracing"
 )
+
+const traceScope = "wallet/httpapi"
 
 type statusRecorder struct {
 	http.ResponseWriter
@@ -54,17 +62,31 @@ func instrument(reg prometheus.Registerer, next http.Handler) (http.Handler, err
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := tracing.Start(ctx, traceScope, r.Method, trace.SpanKindServer,
+			semconv.HTTPRequestMethodKey.String(r.Method), semconv.URLPath(r.URL.Path))
+		r = r.WithContext(tracing.WithTraceID(ctx))
 		rec := &statusRecorder{ResponseWriter: w}
+		defer func() {
+			route := r.Pattern
+			if route == "" {
+				route = "unmatched"
+			} else {
+				span.SetName(route)
+				span.SetAttributes(semconv.HTTPRoute(route))
+			}
+			if rec.status == 0 {
+				rec.status = http.StatusOK
+			}
+			span.SetAttributes(semconv.HTTPResponseStatusCode(rec.status))
+			if rec.status >= http.StatusInternalServerError {
+				span.SetStatus(codes.Error, http.StatusText(rec.status))
+			}
+			span.End()
+			requests.WithLabelValues(r.Method, route, strconv.Itoa(rec.status)).Inc()
+			duration.WithLabelValues(r.Method, route).Observe(time.Since(start).Seconds())
+		}()
 		next.ServeHTTP(rec, r)
-		route := r.Pattern
-		if route == "" {
-			route = "unmatched"
-		}
-		if rec.status == 0 {
-			rec.status = http.StatusOK
-		}
-		requests.WithLabelValues(r.Method, route, strconv.Itoa(rec.status)).Inc()
-		duration.WithLabelValues(r.Method, route).Observe(time.Since(start).Seconds())
 	}), nil
 }
 
