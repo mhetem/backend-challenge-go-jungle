@@ -12,3 +12,6 @@ SELECT * FROM wallets WHERE id = $1;
 
 -- name: GetWalletForUpdate :one
 SELECT * FROM wallets WHERE id = $1 FOR UPDATE;
+
+-- name: GetWalletByPlayer :one
+SELECT * FROM wallets WHERE player_id = $1 AND currency = $2;

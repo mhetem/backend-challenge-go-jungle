@@ -83,6 +83,16 @@ func (d *Database) Migrator(t *testing.T) *pgx.Conn {
 	return conn
 }
 
+func (d *Database) Admin(t *testing.T) *pgx.Conn {
+	t.Helper()
+	conn, err := pgx.Connect(context.Background(), withDatabase(t, Env(t, "ADMIN_DATABASE_URL"), d.Name))
+	if err != nil {
+		t.Fatalf("connect as admin: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	return conn
+}
+
 func Env(t *testing.T, key string) string {
 	t.Helper()
 	value := os.Getenv(key)

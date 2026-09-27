@@ -17,6 +17,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/ledger"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/money"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wager"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wallet"
 	"github.com/mhetem/backend-challenge-go-jungle/test/integration/dbtest"
@@ -40,10 +41,18 @@ func TestWalletsRoundTrip(t *testing.T) {
 			}
 			requireEqual(t, locked.Snapshot(), want.Snapshot())
 		}
+		byPlayer, err := s.Wallets().GetByPlayer(ctx, funded.Wallet.PlayerID(), money.BRL)
+		if err != nil {
+			return err
+		}
+		requireEqual(t, byPlayer.Snapshot(), funded.Wallet.Snapshot())
 		for _, get := range []func(context.Context, uuid.UUID) (*wallet.Wallet, error){s.Wallets().Get, s.Wallets().GetForUpdate} {
 			if _, err := get(ctx, uuid.New()); !errors.Is(err, domain.ErrWalletNotFound) {
 				t.Fatalf("missing wallet: err = %v; want %v", err, domain.ErrWalletNotFound)
 			}
+		}
+		if _, err := s.Wallets().GetByPlayer(ctx, funded.Wallet.PlayerID(), money.USD); !errors.Is(err, domain.ErrWalletNotFound) {
+			t.Fatalf("player's USD wallet: err = %v; want %v", err, domain.ErrWalletNotFound)
 		}
 		return nil
 	}))
@@ -294,6 +303,20 @@ func TestPendingReferenceWakesAndResumes(t *testing.T) {
 	if w.Balance != brl(t, 10000) || w.Version != 3 {
 		t.Fatalf("wallet = %s at version %d; want 100.00 at version 3", w.Balance, w.Version)
 	}
+
+	var reversed []bool
+	must(t, r.InTx(ctx, func(ctx context.Context, s app.Store) error {
+		reversed = nil
+		for _, id := range []uuid.UUID{bet.ID(), waiting.ID(), elsewhere.ID()} {
+			ok, err := s.Transactions().Reversed(ctx, id)
+			if err != nil {
+				return err
+			}
+			reversed = append(reversed, ok)
+		}
+		return nil
+	}))
+	requireEqual(t, reversed, []bool{true, false, false})
 }
 
 func TestLedgerPage(t *testing.T) {
@@ -309,8 +332,15 @@ func TestLedgerPage(t *testing.T) {
 	}
 
 	var first, second, rest, unknown []ledger.Entry
+	var summary, empty app.LedgerSummary
 	must(t, r.InTx(t.Context(), func(ctx context.Context, s app.Store) error {
 		var err error
+		if summary, err = s.Ledger().Summarize(ctx, id, money.BRL); err != nil {
+			return err
+		}
+		if empty, err = s.Ledger().Summarize(ctx, uuid.New(), money.BRL); err != nil {
+			return err
+		}
 		if first, err = s.Ledger().Page(ctx, id, 0, 3); err != nil {
 			return err
 		}
@@ -327,6 +357,8 @@ func TestLedgerPage(t *testing.T) {
 	requireEqual(t, second, want[3:])
 	requireEqual(t, rest, []ledger.Entry{})
 	requireEqual(t, unknown, []ledger.Entry{})
+	requireEqual(t, summary, app.LedgerSummary{Entries: 4, FirstVersion: 1, LastVersion: 4, Net: brl(t, 4000)})
+	requireEqual(t, empty, app.LedgerSummary{Net: brl(t, 0)})
 }
 
 func TestOutboxInsert(t *testing.T) {

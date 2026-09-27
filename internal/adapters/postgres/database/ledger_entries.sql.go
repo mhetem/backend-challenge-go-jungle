@@ -91,3 +91,32 @@ func (q *Queries) ListLedgerEntries(ctx context.Context, arg ListLedgerEntriesPa
 	}
 	return items, nil
 }
+
+const summarizeLedger = `-- name: SummarizeLedger :one
+SELECT
+    count(*)::bigint AS entries,
+    coalesce(min(wallet_version), 0)::bigint AS first_version,
+    coalesce(max(wallet_version), 0)::bigint AS last_version,
+    round(coalesce(sum(CASE WHEN direction = 'CREDIT' THEN amount_minor ELSE -amount_minor END), 0) / 100, 2)::text AS net
+FROM ledger_entries
+WHERE wallet_id = $1
+`
+
+type SummarizeLedgerRow struct {
+	Entries      int64
+	FirstVersion int64
+	LastVersion  int64
+	Net          string
+}
+
+func (q *Queries) SummarizeLedger(ctx context.Context, walletID uuid.UUID) (SummarizeLedgerRow, error) {
+	row := q.db.QueryRow(ctx, summarizeLedger, walletID)
+	var i SummarizeLedgerRow
+	err := row.Scan(
+		&i.Entries,
+		&i.FirstVersion,
+		&i.LastVersion,
+		&i.Net,
+	)
+	return i, err
+}

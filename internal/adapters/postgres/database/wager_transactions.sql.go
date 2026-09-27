@@ -213,6 +213,20 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 	return err
 }
 
+const isTransactionReversed = `-- name: IsTransactionReversed :one
+SELECT EXISTS (
+    SELECT 1 FROM wager_transactions
+    WHERE reference_transaction_id = $1 AND status = 'PROCESSED' AND kind IN ('REFUND', 'ROLLBACK')
+)
+`
+
+func (q *Queries) IsTransactionReversed(ctx context.Context, referenceTransactionID *uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, isTransactionReversed, referenceTransactionID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const updateTransactionState = `-- name: UpdateTransactionState :execrows
 UPDATE wager_transactions
 SET status = $2, failure_code = $3, reference_transaction_id = $4, result_balance_minor = $5,

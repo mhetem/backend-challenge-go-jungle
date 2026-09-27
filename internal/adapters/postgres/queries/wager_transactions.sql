@@ -34,3 +34,9 @@ UPDATE wager_transactions
 SET next_attempt_at = $4
 WHERE provider_id = $1 AND reference_external_transaction_id = $2 AND wallet_id = $3
   AND status = 'PENDING_REFERENCE' AND next_attempt_at > $4;
+
+-- name: IsTransactionReversed :one
+SELECT EXISTS (
+    SELECT 1 FROM wager_transactions
+    WHERE reference_transaction_id = $1 AND status = 'PROCESSED' AND kind IN ('REFUND', 'ROLLBACK')
+);

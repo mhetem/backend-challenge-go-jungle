@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/postgres/database"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/ledger"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/money"
 )
@@ -52,6 +53,23 @@ func (r ledgerEntries) Page(ctx context.Context, walletID uuid.UUID, afterVersio
 		entries = append(entries, e)
 	}
 	return entries, nil
+}
+
+func (r ledgerEntries) Summarize(ctx context.Context, walletID uuid.UUID, cur money.Currency) (app.LedgerSummary, error) {
+	row, err := r.q.SummarizeLedger(ctx, walletID)
+	if err != nil {
+		return app.LedgerSummary{}, classify(err)
+	}
+	net, err := money.ParseSigned(row.Net, string(cur))
+	if err != nil {
+		return app.LedgerSummary{}, corrupt(err)
+	}
+	return app.LedgerSummary{
+		Entries:      row.Entries,
+		FirstVersion: row.FirstVersion,
+		LastVersion:  row.LastVersion,
+		Net:          net,
+	}, nil
 }
 
 func entryFrom(row database.LedgerEntry) (ledger.Entry, error) {

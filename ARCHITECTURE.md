@@ -148,7 +148,59 @@ Formato dos campos, validado antes das regras de negócio:
 - Todos os erros de formato voltam juntos, um por campo. Só depois vêm as regras do domínio:
   `OPENING` proibido, política de valor zero e presença da referência.
 
+Decisão ao receber uma operação, já com o lock da carteira:
+
+| Situação | Resultado |
+|---|---|
+| Mesma chave, mesmo hash | Replay: o resultado gravado, com `idempotentReplay: true` |
+| Mesma chave, hash diferente | Conflito `IDEMPOTENCY_KEY_REUSED`, nada é gravado |
+| Mesmo `externalTransactionId` com outra chave | Conflito `EXTERNAL_TRANSACTION_ID_CONFLICT`, nada é gravado |
+| Nenhuma das anteriores | Operação nova: regras, persistência e eventos |
+
+- A chave e o id externo são únicos por provider. O mesmo `externalTransactionId` em outro
+  provider é outra operação.
+- O replay devolve o estado gravado, inclusive o saldo observado no processamento original,
+  mesmo que a carteira já tenha se movido. Também vale para rejeições e para
+  `PENDING_REFERENCE`.
+- A consulta acontece depois do lock da carteira. Assim, requisições concorrentes com a mesma
+  chave se enfileiram, e a segunda já vê a primeira confirmada. Quando a carteira não existe
+  não há lock, e a corrida termina num `23505`. A nova execução de `InTx` encontra a
+  vencedora e responde com replay ou conflito.
+
 ## Locking e concorrência
+
+- Lock pessimista por carteira: toda operação começa com `SELECT … FOR UPDATE` na carteira e
+  o segura por alguns milissegundos, até o commit.
+- Carteiras diferentes não disputam nada. Não há lock global, e cada instância processa em
+  paralelo.
+- Deadlock é estruturalmente impossível: cada transação trava no máximo uma carteira, sempre
+  na ordem carteira → linhas de transação.
+- Duas barreiras continuam atrás do lock:
+  - o `UPDATE` condicionado à versão esperada, que falha com `ErrConcurrentUpdate` e é
+    repetido;
+  - a trigger adiada que exige o lançamento correspondente no commit.
+- Um lock que não sai em `lock_timeout` vira falha transitória (`55P03`). `InTx` tenta de
+  novo algumas vezes antes de devolver o erro.
+- Ao terminar (`PROCESSED` ou `REJECTED`), a operação acorda as dependentes da mesma
+  carteira: transações em `PENDING_REFERENCE` que apontam para o seu
+  `externalTransactionId` passam a ter `next_attempt_at = agora`. Assim o resolver não
+  espera o backoff inteiro.
+
+## Reconciliação
+
+- `POST /wallets/{id}/reconciliation` reconstrói o saldo a partir do ledger numa transação
+  `REPEATABLE READ READ ONLY`: carteira e lançamentos são lidos no mesmo instante, e nada é
+  escrito.
+- A soma dos lançamentos com sinal (crédito positivo, débito negativo) é feita em `NUMERIC`.
+  Ela volta como texto e passa por `money.ParseSigned`, então uma soma fora do intervalo de
+  `int64` vira erro em vez de dar a volta.
+- A versão também é conferida: os lançamentos têm de formar uma sequência contínua que
+  termina na versão da carteira. A sequência começa na versão 1 (abertura com saldo) ou 2
+  (abertura com zero). Sem lançamentos, a carteira tem de estar na versão 1.
+- `difference = storedBalance − calculatedBalance`. O resultado só é `consistent` quando a
+  diferença é zero e as versões são contínuas.
+- Uma divergência é registrada em log `WARN`, com os saldos, a diferença e as versões, e
+  incrementa uma métrica.
 
 ## Máquina de estados
 
@@ -191,7 +243,8 @@ sentinels de `app` e do domínio. O erro original continua acessível por `error
 - Conflito repetível (`app.ErrRetryableConflict`): `23505` nos índices de chave de
   idempotência, id externo e reversão, ou um `UPDATE` condicional que não encontrou a linha
   na versão ou no estado esperado. `InTx` repete a transação na hora.
-- Erro de domínio: `23505` em `wallets_player_currency_key` vira `WALLET_ALREADY_EXISTS`.
+- Erro de domínio: `23505` em `wallets_player_currency_key` vira `WALLET_ALREADY_EXISTS`, e
+  a resposta traz o id da carteira existente.
 - Permanentes (`app.ErrPermanent`): qualquer outra violação de integridade (`CHECK`, FK,
   triggers), estado gravado corrompido (um `Rehydrate` que falha) ou retries transitórios
   esgotados no resolver. A transação vai para `FAILED` com `PROCESSING_FAILED`, para

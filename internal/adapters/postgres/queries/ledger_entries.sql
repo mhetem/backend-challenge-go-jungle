@@ -9,3 +9,12 @@ SELECT * FROM ledger_entries
 WHERE wallet_id = $1 AND wallet_version > $2
 ORDER BY wallet_version
 LIMIT $3;
+
+-- name: SummarizeLedger :one
+SELECT
+    count(*)::bigint AS entries,
+    coalesce(min(wallet_version), 0)::bigint AS first_version,
+    coalesce(max(wallet_version), 0)::bigint AS last_version,
+    round(coalesce(sum(CASE WHEN direction = 'CREDIT' THEN amount_minor ELSE -amount_minor END), 0) / 100, 2)::text AS net
+FROM ledger_entries
+WHERE wallet_id = $1;

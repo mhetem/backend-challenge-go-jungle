@@ -174,3 +174,67 @@ func TestCommandAcceptsEdgeTokens(t *testing.T) {
 		t.Fatalf("Command = %+v", cmd)
 	}
 }
+
+func openWallet() app.OpenWalletRequest {
+	return app.OpenWalletRequest{
+		PlayerID:       playerID,
+		InitialBalance: app.MoneyRequest{Amount: "1000.00", Currency: "BRL"},
+	}
+}
+
+func TestOpenWalletCommand(t *testing.T) {
+	for _, amount := range []string{"1000.00", "0.00"} {
+		r := openWallet()
+		r.InitialBalance.Amount = amount
+		cmd, err := r.Command("corr-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		initial, err := money.Parse(amount, "BRL")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := app.OpenWallet{PlayerID: uuid.MustParse(playerID), InitialBalance: initial, CorrelationID: "corr-1"}
+		if cmd != want {
+			t.Fatalf("Command = %+v; want %+v", cmd, want)
+		}
+	}
+}
+
+func TestOpenWalletValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*app.OpenWalletRequest, *string)
+		want   string
+	}{
+		{"missing player", func(r *app.OpenWalletRequest, _ *string) { r.PlayerID = "" }, "playerId: REQUIRED"},
+		{"malformed player", func(r *app.OpenWalletRequest, _ *string) { r.PlayerID = "player-1" }, "playerId: INVALID_VALUE"},
+		{"missing balance", func(r *app.OpenWalletRequest, _ *string) {
+			r.InitialBalance = app.MoneyRequest{}
+		}, "initialBalance.amount: REQUIRED\ninitialBalance.currency: REQUIRED"},
+		{"negative balance", func(r *app.OpenWalletRequest, _ *string) {
+			r.InitialBalance.Amount = "-1.00"
+		}, "initialBalance.amount: INVALID_AMOUNT"},
+		{"balance without cents", func(r *app.OpenWalletRequest, _ *string) {
+			r.InitialBalance.Amount = "1000"
+		}, "initialBalance.amount: INVALID_AMOUNT"},
+		{"unsupported currency", func(r *app.OpenWalletRequest, _ *string) {
+			r.InitialBalance.Currency = "JPY"
+		}, "initialBalance.currency: INVALID_VALUE"},
+		{"missing correlation", func(_ *app.OpenWalletRequest, corr *string) { *corr = "" }, "correlationId: REQUIRED"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, corr := openWallet(), "corr-1"
+			tt.mutate(&r, &corr)
+			cmd, err := r.Command(corr)
+			if err == nil || err.Error() != tt.want || cmd != (app.OpenWallet{}) {
+				t.Fatalf("Command = %+v, %v; want error %q", cmd, err, tt.want)
+			}
+			var de *domain.Error
+			if !errors.As(err, &de) || de.Category != domain.Invalid {
+				t.Fatalf("error %v is not a domain Invalid error", err)
+			}
+		})
+	}
+}

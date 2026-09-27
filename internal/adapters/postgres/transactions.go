@@ -36,6 +36,11 @@ func (r transactions) GetByExternalID(ctx context.Context, providerID, externalI
 	}))
 }
 
+func (r transactions) Reversed(ctx context.Context, id uuid.UUID) (bool, error) {
+	reversed, err := r.q.IsTransactionReversed(ctx, &id)
+	return reversed, classify(err)
+}
+
 func (r transactions) Insert(ctx context.Context, tx *wager.Transaction) error {
 	return classify(r.q.InsertTransaction(ctx, transactionParams(tx)))
 }

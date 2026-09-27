@@ -25,6 +25,13 @@ func (r wallets) GetForUpdate(ctx context.Context, id uuid.UUID) (*wallet.Wallet
 	return walletFrom(r.q.GetWalletForUpdate(ctx, id))
 }
 
+func (r wallets) GetByPlayer(ctx context.Context, playerID uuid.UUID, cur money.Currency) (*wallet.Wallet, error) {
+	return walletFrom(r.q.GetWalletByPlayer(ctx, database.GetWalletByPlayerParams{
+		PlayerID: playerID,
+		Currency: string(cur),
+	}))
+}
+
 func (r wallets) Insert(ctx context.Context, w *wallet.Wallet) error {
 	s := w.Snapshot()
 	cur, _ := s.Balance.Currency()

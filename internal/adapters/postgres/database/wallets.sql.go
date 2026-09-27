@@ -31,6 +31,30 @@ func (q *Queries) GetWallet(ctx context.Context, id uuid.UUID) (Wallet, error) {
 	return i, err
 }
 
+const getWalletByPlayer = `-- name: GetWalletByPlayer :one
+SELECT id, player_id, currency, balance_minor, version, created_at, updated_at FROM wallets WHERE player_id = $1 AND currency = $2
+`
+
+type GetWalletByPlayerParams struct {
+	PlayerID uuid.UUID
+	Currency string
+}
+
+func (q *Queries) GetWalletByPlayer(ctx context.Context, arg GetWalletByPlayerParams) (Wallet, error) {
+	row := q.db.QueryRow(ctx, getWalletByPlayer, arg.PlayerID, arg.Currency)
+	var i Wallet
+	err := row.Scan(
+		&i.ID,
+		&i.PlayerID,
+		&i.Currency,
+		&i.BalanceMinor,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getWalletForUpdate = `-- name: GetWalletForUpdate :one
 SELECT id, player_id, currency, balance_minor, version, created_at, updated_at FROM wallets WHERE id = $1 FOR UPDATE
 `

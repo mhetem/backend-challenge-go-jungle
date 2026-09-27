@@ -44,6 +44,17 @@ type WagerRequest struct {
 	ReferenceExternalTransactionID string       `json:"referenceExternalTransactionId,omitempty"`
 }
 
+type OpenWallet struct {
+	PlayerID       uuid.UUID
+	InitialBalance money.Money
+	CorrelationID  string
+}
+
+type OpenWalletRequest struct {
+	PlayerID       string       `json:"playerId"`
+	InitialBalance MoneyRequest `json:"initialBalance"`
+}
+
 type WagerTransactionRequestedData struct {
 	WagerRequest
 	IdempotencyKey string `json:"idempotencyKey"`
@@ -57,6 +68,17 @@ func (d WagerTransactionRequestedData) Command(correlationID string) (SubmitWage
 	return newSubmitWager(d.WagerRequest, d.IdempotencyKey, correlationID, ChannelSQS)
 }
 
+func (r OpenWalletRequest) Command(correlationID string) (OpenWallet, error) {
+	var v domain.Validation
+	playerID := parseUUID(&v, "playerId", r.PlayerID)
+	initial := parseMoney(&v, "initialBalance", r.InitialBalance)
+	checkToken(&v, "correlationId", correlationID)
+	if err := v.Err(); err != nil {
+		return OpenWallet{}, err
+	}
+	return OpenWallet{PlayerID: playerID, InitialBalance: initial, CorrelationID: correlationID}, nil
+}
+
 func newSubmitWager(r WagerRequest, idempotencyKey, correlationID string, channel Channel) (SubmitWager, error) {
 	var v domain.Validation
 	checkToken(&v, "providerId", r.ProviderID)
@@ -66,7 +88,7 @@ func newSubmitWager(r WagerRequest, idempotencyKey, correlationID string, channe
 	checkToken(&v, "roundId", r.RoundID)
 	checkToken(&v, "gameId", r.GameID)
 	kind := parseKind(&v, r.Kind)
-	amount := parseMoney(&v, r.Money)
+	amount := parseMoney(&v, "money", r.Money)
 	if r.ReferenceExternalTransactionID != "" {
 		checkToken(&v, "referenceExternalTransactionId", r.ReferenceExternalTransactionID)
 	}
@@ -142,18 +164,18 @@ func parseKind(v *domain.Validation, s string) wager.Kind {
 	return k
 }
 
-func parseMoney(v *domain.Validation, m MoneyRequest) money.Money {
-	v.Check(m.Amount != "", "money.amount", domain.ErrRequired)
-	v.Check(m.Currency != "", "money.currency", domain.ErrRequired)
+func parseMoney(v *domain.Validation, field string, m MoneyRequest) money.Money {
+	v.Check(m.Amount != "", field+".amount", domain.ErrRequired)
+	v.Check(m.Currency != "", field+".currency", domain.ErrRequired)
 	if m.Amount == "" || m.Currency == "" {
 		return money.Money{}
 	}
 	parsed, err := money.Parse(m.Amount, m.Currency)
 	switch {
 	case errors.Is(err, money.ErrInvalidCurrency):
-		v.Add("money.currency", domain.ErrInvalidValue)
+		v.Add(field+".currency", domain.ErrInvalidValue)
 	case err != nil:
-		v.Add("money.amount", domain.ErrInvalidAmount)
+		v.Add(field+".amount", domain.ErrInvalidAmount)
 	}
 	return parsed
 }
