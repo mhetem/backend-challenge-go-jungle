@@ -36,6 +36,27 @@ func (r transactions) GetByExternalID(ctx context.Context, providerID, externalI
 	}))
 }
 
+func (r transactions) GetForUpdate(ctx context.Context, id uuid.UUID) (*wager.Transaction, error) {
+	return transactionFrom(r.q.GetTransactionForUpdate(ctx, id))
+}
+
+func (r transactions) Due(ctx context.Context, now time.Time, limit int) ([]app.DueTransaction, error) {
+	rows, err := r.q.ListDueTransactions(ctx, database.ListDueTransactionsParams{NextAttemptAt: &now, Limit: int32(limit)})
+	if err != nil {
+		return nil, classify(err)
+	}
+	due := make([]app.DueTransaction, len(rows))
+	for i, row := range rows {
+		due[i] = app.DueTransaction{ID: row.ID, WalletID: row.WalletID}
+	}
+	return due, nil
+}
+
+func (r transactions) MarkFailed(ctx context.Context, id uuid.UUID, now time.Time) (bool, error) {
+	rows, err := r.q.FailTransaction(ctx, database.FailTransactionParams{ID: id, UpdatedAt: now})
+	return rows == 1, classify(err)
+}
+
 func (r transactions) Reversed(ctx context.Context, id uuid.UUID) (bool, error) {
 	reversed, err := r.q.IsTransactionReversed(ctx, &id)
 	return reversed, classify(err)

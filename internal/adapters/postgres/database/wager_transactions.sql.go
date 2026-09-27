@@ -12,6 +12,25 @@ import (
 	"github.com/google/uuid"
 )
 
+const failTransaction = `-- name: FailTransaction :execrows
+UPDATE wager_transactions
+SET status = 'FAILED', failure_code = 'PROCESSING_FAILED', updated_at = $2, completed_at = $2
+WHERE id = $1 AND status = 'PENDING_REFERENCE'
+`
+
+type FailTransactionParams struct {
+	ID        uuid.UUID
+	UpdatedAt time.Time
+}
+
+func (q *Queries) FailTransaction(ctx context.Context, arg FailTransactionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, failTransaction, arg.ID, arg.UpdatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getTransaction = `-- name: GetTransaction :one
 SELECT id, origin, kind, status, wallet_id, player_id, currency, amount_minor, provider_id, external_transaction_id, idempotency_key, payload_hash, round_id, game_id, reference_external_transaction_id, reference_transaction_id, correlation_id, failure_code, result_balance_minor, result_wallet_version, attempts, next_attempt_at, reference_deadline_at, created_at, updated_at, completed_at FROM wager_transactions WHERE id = $1
 `
@@ -136,6 +155,44 @@ func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, arg GetTra
 	return i, err
 }
 
+const getTransactionForUpdate = `-- name: GetTransactionForUpdate :one
+SELECT id, origin, kind, status, wallet_id, player_id, currency, amount_minor, provider_id, external_transaction_id, idempotency_key, payload_hash, round_id, game_id, reference_external_transaction_id, reference_transaction_id, correlation_id, failure_code, result_balance_minor, result_wallet_version, attempts, next_attempt_at, reference_deadline_at, created_at, updated_at, completed_at FROM wager_transactions WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetTransactionForUpdate(ctx context.Context, id uuid.UUID) (WagerTransaction, error) {
+	row := q.db.QueryRow(ctx, getTransactionForUpdate, id)
+	var i WagerTransaction
+	err := row.Scan(
+		&i.ID,
+		&i.Origin,
+		&i.Kind,
+		&i.Status,
+		&i.WalletID,
+		&i.PlayerID,
+		&i.Currency,
+		&i.AmountMinor,
+		&i.ProviderID,
+		&i.ExternalTransactionID,
+		&i.IdempotencyKey,
+		&i.PayloadHash,
+		&i.RoundID,
+		&i.GameID,
+		&i.ReferenceExternalTransactionID,
+		&i.ReferenceTransactionID,
+		&i.CorrelationID,
+		&i.FailureCode,
+		&i.ResultBalanceMinor,
+		&i.ResultWalletVersion,
+		&i.Attempts,
+		&i.NextAttemptAt,
+		&i.ReferenceDeadlineAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
 const insertTransaction = `-- name: InsertTransaction :exec
 INSERT INTO wager_transactions (
     id, origin, kind, status, wallet_id, player_id, currency, amount_minor,
@@ -225,6 +282,43 @@ func (q *Queries) IsTransactionReversed(ctx context.Context, referenceTransactio
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const listDueTransactions = `-- name: ListDueTransactions :many
+SELECT id, wallet_id FROM wager_transactions
+WHERE status = 'PENDING_REFERENCE' AND next_attempt_at <= $1
+ORDER BY next_attempt_at
+LIMIT $2
+`
+
+type ListDueTransactionsParams struct {
+	NextAttemptAt *time.Time
+	Limit         int32
+}
+
+type ListDueTransactionsRow struct {
+	ID       uuid.UUID
+	WalletID uuid.UUID
+}
+
+func (q *Queries) ListDueTransactions(ctx context.Context, arg ListDueTransactionsParams) ([]ListDueTransactionsRow, error) {
+	rows, err := q.db.Query(ctx, listDueTransactions, arg.NextAttemptAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDueTransactionsRow{}
+	for rows.Next() {
+		var i ListDueTransactionsRow
+		if err := rows.Scan(&i.ID, &i.WalletID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateTransactionState = `-- name: UpdateTransactionState :execrows

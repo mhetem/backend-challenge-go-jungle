@@ -37,6 +37,7 @@ type Config struct {
 	SQS              SQS
 	OIDC             OIDC
 	PendingReference PendingReference
+	Resolver         ResolverConfig
 }
 
 type Database struct {
@@ -64,6 +65,12 @@ type OIDC struct {
 	Issuer   string
 	JWKSURL  string
 	Audience string
+}
+
+type ResolverConfig struct {
+	PollInterval time.Duration
+	BatchSize    int
+	MaxFailures  int
 }
 
 type PendingReference struct {
@@ -114,6 +121,11 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 			MaxAttempts: e.positive("PENDING_REF_MAX_ATTEMPTS", 20),
 			BackoffBase: e.duration("PENDING_REF_BACKOFF_BASE", time.Second),
 			BackoffCap:  e.duration("PENDING_REF_BACKOFF_CAP", time.Minute),
+		},
+		Resolver: ResolverConfig{
+			PollInterval: e.duration("RESOLVER_POLL_INTERVAL", time.Second),
+			BatchSize:    e.positive("RESOLVER_BATCH_SIZE", 100),
+			MaxFailures:  e.positive("RESOLVER_MAX_FAILURES", 3),
 		},
 	}
 	cfg.OIDC.JWKSURL = e.link("OIDC_JWKS_URL", strings.TrimSuffix(cfg.OIDC.Issuer, "/")+"/protocol/openid-connect/certs", "http", "https")

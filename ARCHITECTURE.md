@@ -269,6 +269,36 @@ sentinels de `app` e do domínio. O erro original continua acessível por `error
   são checados antes do status. Uma referência que nunca vai servir é rejeitada na hora, sem
   esperar o TTL.
 
+Resolver:
+- Toda instância roda um resolver (componente `resolver`), sem eleição de líder.
+- A cada `RESOLVER_POLL_INTERVAL` (1 s), ele lê sem lock os ids vencidos
+  (`next_attempt_at <= agora`, até `RESOLVER_BATCH_SIZE`).
+- Cada id é tratado na sua própria transação:
+  1. trava a carteira e depois a transação, na mesma ordem do caminho síncrono, o que
+     impede deadlock;
+  2. confere de novo se a transação ainda está pendente e vencida (senão, pula);
+  3. chama as mesmas regras do envio.
+- O resultado sai direto das regras do domínio:
+  - referência processada: a operação é aplicada;
+  - referência ausente ou pendente: reagenda com backoff;
+  - TTL ou tentativas esgotadas: `REJECTED`;
+  - referência rejeitada ou falha: `REFERENCE_NOT_PROCESSED`.
+- Vários resolvers disputam os mesmos ids sem problema. O segundo espera o lock da carteira,
+  encontra a transação já resolvida e pula. Cada transação é aplicada uma vez.
+- Um resolver interrompido no meio de uma transação faz rollback. O id continua pendente e
+  qualquer instância o retoma no próximo ciclo.
+- Toda operação que termina (`PROCESSED` ou `REJECTED`) acorda as dependentes da mesma
+  carteira, seja no envio ou no resolver. Cadeias como rollback → refund → bet se resolvem
+  sem esperar o backoff.
+- Um erro permanente repetido (`RESOLVER_MAX_FAILURES` vezes seguidas, 3 por padrão) no
+  mesmo id grava `FAILED` com `PROCESSING_FAILED`.
+  - A gravação não depende de reidratar a linha, então funciona mesmo com estado corrompido.
+  - Erro transitório nunca leva a `FAILED`. O TTL encerra a transação quando o banco
+    voltar.
+  - `FAILED` não gera evento: é um estado de auditoria, consultável por GET.
+- Métrica: `wallet_resolver_outcomes_total{outcome}` (processed, rejected, rescheduled,
+  skipped, failed, error).
+
 ## Política de reversão
 
 - Cada transação referenciada recebe no máximo uma reversão processada, de qualquer tipo.

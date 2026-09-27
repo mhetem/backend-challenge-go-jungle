@@ -40,3 +40,17 @@ SELECT EXISTS (
     SELECT 1 FROM wager_transactions
     WHERE reference_transaction_id = $1 AND status = 'PROCESSED' AND kind IN ('REFUND', 'ROLLBACK')
 );
+
+-- name: ListDueTransactions :many
+SELECT id, wallet_id FROM wager_transactions
+WHERE status = 'PENDING_REFERENCE' AND next_attempt_at <= $1
+ORDER BY next_attempt_at
+LIMIT $2;
+
+-- name: GetTransactionForUpdate :one
+SELECT * FROM wager_transactions WHERE id = $1 FOR UPDATE;
+
+-- name: FailTransaction :execrows
+UPDATE wager_transactions
+SET status = 'FAILED', failure_code = 'PROCESSING_FAILED', updated_at = $2, completed_at = $2
+WHERE id = $1 AND status = 'PENDING_REFERENCE';

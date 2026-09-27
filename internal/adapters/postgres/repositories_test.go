@@ -463,3 +463,94 @@ func TestInboxRoundTrip(t *testing.T) {
 		t.Fatalf("completion without receipt: err = %v; want %v", err, app.ErrPermanent)
 	}
 }
+
+func TestDueTransactionsAndMarkFailed(t *testing.T) {
+	t.Parallel()
+	r := newRunner(t, config(dbtest.New(t).AppURL))
+	walletID, playerID := uuid.New(), uuid.New()
+	pending := func(extID string, next time.Time) *wager.Transaction {
+		return rehydrate(t, wager.Snapshot{
+			ID:                             uuid.New(),
+			WalletID:                       walletID,
+			PlayerID:                       playerID,
+			Kind:                           wager.Refund,
+			Money:                          brl(t, 2500),
+			ProviderID:                     "provider-a",
+			ExternalTransactionID:          extID,
+			IdempotencyKey:                 "provider-a:" + extID,
+			PayloadHash:                    hash(extID),
+			RoundID:                        "round-1",
+			GameID:                         "game-1",
+			ReferenceExternalTransactionID: "bet-" + extID,
+			CorrelationID:                  "corr-" + extID,
+			Status:                         wager.PendingReference,
+			Attempts:                       1,
+			NextAttemptAt:                  next,
+			ReferenceDeadlineAt:            t0.Add(15 * time.Minute),
+			CreatedAt:                      t0,
+			UpdatedAt:                      t0,
+		})
+	}
+	later := pending("refund-later", t0.Add(time.Minute))
+	second := pending("refund-second", t0.Add(2*time.Second))
+	first := pending("refund-first", t0.Add(time.Second))
+	third := pending("refund-third", t0.Add(3*time.Second))
+	must(t, r.InTx(t.Context(), func(ctx context.Context, s app.Store) error {
+		for _, tx := range []*wager.Transaction{later, second, first, third} {
+			if err := s.Transactions().Insert(ctx, tx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	var due, limited []app.DueTransaction
+	must(t, r.InTx(t.Context(), func(ctx context.Context, s app.Store) error {
+		var err error
+		if due, err = s.Transactions().Due(ctx, t0.Add(10*time.Second), 10); err != nil {
+			return err
+		}
+		limited, err = s.Transactions().Due(ctx, t0.Add(10*time.Second), 2)
+		return err
+	}))
+	ids := func(ds []app.DueTransaction) []uuid.UUID {
+		out := make([]uuid.UUID, len(ds))
+		for i, d := range ds {
+			if d.WalletID != walletID {
+				t.Fatalf("due %s carries wallet %s; want %s", d.ID, d.WalletID, walletID)
+			}
+			out[i] = d.ID
+		}
+		return out
+	}
+	requireEqual(t, ids(due), []uuid.UUID{first.ID(), second.ID(), third.ID()})
+	requireEqual(t, ids(limited), []uuid.UUID{first.ID(), second.ID()})
+
+	var failed, again bool
+	must(t, r.InTx(t.Context(), func(ctx context.Context, s app.Store) error {
+		locked, err := s.Transactions().GetForUpdate(ctx, first.ID())
+		if err != nil {
+			return err
+		}
+		requireEqual(t, locked.Snapshot(), first.Snapshot())
+		if failed, err = s.Transactions().MarkFailed(ctx, first.ID(), t0.Add(time.Hour)); err != nil {
+			return err
+		}
+		again, err = s.Transactions().MarkFailed(ctx, first.ID(), t0.Add(2*time.Hour))
+		return err
+	}))
+	if !failed || again {
+		t.Fatalf("MarkFailed = %v then %v; want true, then false once terminal", failed, again)
+	}
+	got := getTransaction(t, r, first.ID()).Snapshot()
+	if got.Status != wager.Failed || got.FailureCode != wager.ProcessingFailed || !got.CompletedAt.Equal(t0.Add(time.Hour)) ||
+		!got.UpdatedAt.Equal(t0.Add(time.Hour)) || got.Result != nil {
+		t.Fatalf("failed transaction = %+v", got)
+	}
+	must(t, r.InTx(t.Context(), func(ctx context.Context, s app.Store) error {
+		var err error
+		due, err = s.Transactions().Due(ctx, t0.Add(10*time.Second), 10)
+		return err
+	}))
+	requireEqual(t, ids(due), []uuid.UUID{second.ID(), third.ID()})
+}

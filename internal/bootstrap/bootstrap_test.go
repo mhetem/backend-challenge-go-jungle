@@ -17,6 +17,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/health"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/logging"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/workers/resolver"
 )
 
 func testConfig(t *testing.T) config.Config {
@@ -49,9 +50,10 @@ func TestGraphIsComplete(t *testing.T) {
 		checker *health.Checker
 		tokens  *oidc.Verifier
 		authn   auth.Authenticator
+		pending *resolver.Resolver
 	)
 	err := fx.ValidateApp(Options(testConfig(t)),
-		fx.Populate(&wallets, &wagers, &runner, &pool, &queues, &public, &admin, &checker, &tokens, &authn))
+		fx.Populate(&wallets, &wagers, &runner, &pool, &queues, &public, &admin, &checker, &tokens, &authn, &pending))
 	if err != nil {
 		t.Fatal(err)
 	}

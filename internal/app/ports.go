@@ -38,10 +38,18 @@ type Transactions interface {
 	Get(ctx context.Context, id uuid.UUID) (*wager.Transaction, error)
 	GetByIdempotencyKey(ctx context.Context, providerID, key string) (*wager.Transaction, error)
 	GetByExternalID(ctx context.Context, providerID, externalID string) (*wager.Transaction, error)
+	GetForUpdate(ctx context.Context, id uuid.UUID) (*wager.Transaction, error)
+	Due(ctx context.Context, now time.Time, limit int) ([]DueTransaction, error)
 	Reversed(ctx context.Context, id uuid.UUID) (bool, error)
 	Insert(ctx context.Context, tx *wager.Transaction) error
 	UpdateState(ctx context.Context, tx *wager.Transaction) error
 	WakeDependents(ctx context.Context, providerID, externalID string, walletID uuid.UUID, now time.Time) (int64, error)
+	MarkFailed(ctx context.Context, id uuid.UUID, now time.Time) (bool, error)
+}
+
+type DueTransaction struct {
+	ID       uuid.UUID
+	WalletID uuid.UUID
 }
 
 type Ledger interface {

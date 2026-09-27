@@ -50,6 +50,9 @@ func TestDefaults(t *testing.T) {
 		o.JWKSURL != "http://localhost:8080/realms/wagering/protocol/openid-connect/certs" {
 		t.Fatalf("OIDC defaults = %+v", o)
 	}
+	if r := cfg.Resolver; r.PollInterval != time.Second || r.BatchSize != 100 || r.MaxFailures != 3 {
+		t.Fatalf("resolver defaults = %+v", r)
+	}
 	if p := cfg.PendingReference; p.TTL != 15*time.Minute || p.MaxAttempts != 20 || p.BackoffBase != time.Second || p.BackoffCap != time.Minute {
 		t.Fatalf("pending reference defaults = %+v", p)
 	}
@@ -98,6 +101,7 @@ func TestInvalidValues(t *testing.T) {
 		{"duration without a unit", map[string]string{"DB_LOCK_TIMEOUT": "2"}, `DB_LOCK_TIMEOUT: must be a positive duration such as 30s, got "2"`},
 		{"negative duration", map[string]string{"START_TIMEOUT": "-1s"}, `START_TIMEOUT: must be a positive duration such as 30s, got "-1s"`},
 		{"zero connections", map[string]string{"DB_MAX_CONNS": "0"}, `DB_MAX_CONNS: must be a positive integer, got "0"`},
+		{"resolver without a batch", map[string]string{"RESOLVER_BATCH_SIZE": "0"}, `RESOLVER_BATCH_SIZE: must be a positive integer, got "0"`},
 		{"connections beyond int32", map[string]string{"DB_MAX_CONNS": "3000000000"}, `DB_MAX_CONNS: must be a positive integer, got "3000000000"`},
 		{"shutdown outlasting visibility", map[string]string{"SHUTDOWN_TIMEOUT": "30s"}, "SHUTDOWN_TIMEOUT: must be shorter than SQS_VISIBILITY_TIMEOUT (30s)"},
 		{"backoff base above its cap", map[string]string{"PENDING_REF_BACKOFF_BASE": "2m"}, "PENDING_REF_BACKOFF_BASE: must not exceed PENDING_REF_BACKOFF_CAP (1m0s)"},
