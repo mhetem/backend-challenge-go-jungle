@@ -39,6 +39,7 @@ type Config struct {
 	PendingReference PendingReference
 	Resolver         ResolverConfig
 	Outbox           OutboxConfig
+	Consumer         ConsumerConfig
 }
 
 type Database struct {
@@ -74,6 +75,12 @@ type OutboxConfig struct {
 	Lease        time.Duration
 	BackoffBase  time.Duration
 	BackoffCap   time.Duration
+}
+
+type ConsumerConfig struct {
+	Workers        int
+	WaitTime       time.Duration
+	MessageTimeout time.Duration
 }
 
 type ResolverConfig struct {
@@ -143,10 +150,24 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 			BackoffBase:  e.duration("OUTBOX_BACKOFF_BASE", time.Second),
 			BackoffCap:   e.duration("OUTBOX_BACKOFF_CAP", 5*time.Minute),
 		},
+		Consumer: ConsumerConfig{
+			Workers:        e.positive("CONSUMER_WORKERS", 4),
+			WaitTime:       e.duration("CONSUMER_WAIT_TIME", 20*time.Second),
+			MessageTimeout: e.duration("CONSUMER_MESSAGE_TIMEOUT", 10*time.Second),
+		},
 	}
 	cfg.OIDC.JWKSURL = e.link("OIDC_JWKS_URL", strings.TrimSuffix(cfg.OIDC.Issuer, "/")+"/protocol/openid-connect/certs", "http", "https")
+	if v := cfg.SQS.VisibilityTimeout; v%time.Second != 0 || v > 12*time.Hour {
+		e.fail("SQS_VISIBILITY_TIMEOUT", "must be whole seconds up to 12h, got %s", v)
+	}
 	if cfg.ShutdownTimeout >= cfg.SQS.VisibilityTimeout {
 		e.fail("SHUTDOWN_TIMEOUT", "must be shorter than SQS_VISIBILITY_TIMEOUT (%s)", cfg.SQS.VisibilityTimeout)
+	}
+	if w := cfg.Consumer.WaitTime; w%time.Second != 0 || w > 20*time.Second {
+		e.fail("CONSUMER_WAIT_TIME", "must be whole seconds from 1s to 20s, got %s", w)
+	}
+	if cfg.Consumer.MessageTimeout >= cfg.ShutdownTimeout {
+		e.fail("CONSUMER_MESSAGE_TIMEOUT", "must be shorter than SHUTDOWN_TIMEOUT (%s)", cfg.ShutdownTimeout)
 	}
 	if cfg.PendingReference.BackoffBase > cfg.PendingReference.BackoffCap {
 		e.fail("PENDING_REF_BACKOFF_BASE", "must not exceed PENDING_REF_BACKOFF_CAP (%s)", cfg.PendingReference.BackoffCap)

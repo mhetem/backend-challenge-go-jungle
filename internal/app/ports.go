@@ -24,6 +24,11 @@ type Store interface {
 	Ledger() Ledger
 	Outbox() Outbox
 	Inbox() Inbox
+	Providers() Providers
+}
+
+type Providers interface {
+	Exists(ctx context.Context, id string) (bool, error)
 }
 
 type Wallets interface {

@@ -31,6 +31,10 @@ func (s store) Inbox() app.Inbox {
 	return inbox(s)
 }
 
+func (s store) Providers() app.Providers {
+	return providers(s)
+}
+
 func nullable[T comparable](v T) *T {
 	var zero T
 	if v == zero {

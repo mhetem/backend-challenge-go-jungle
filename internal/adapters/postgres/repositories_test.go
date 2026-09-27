@@ -654,3 +654,20 @@ func TestOutboxClaimMarkRelease(t *testing.T) {
 		t.Fatalf("backlog = %d; want 5", pending)
 	}
 }
+
+func TestProviderExists(t *testing.T) {
+	t.Parallel()
+	r := newRunner(t, config(dbtest.New(t).AppURL))
+	must(t, r.InReadOnlySnapshot(t.Context(), func(ctx context.Context, s app.Store) error {
+		for id, want := range map[string]bool{"provider-a": true, "provider-b": true, "provider-c": false, "PROVIDER-A": false} {
+			got, err := s.Providers().Exists(ctx, id)
+			if err != nil {
+				return err
+			}
+			if got != want {
+				t.Fatalf("Exists(%q) = %t; want %t", id, got, want)
+			}
+		}
+		return nil
+	}))
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/health"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/logging"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/workers/consumer"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/workers/outbox"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/workers/resolver"
 )
@@ -36,6 +37,7 @@ func Options(cfg config.Config) fx.Option {
 		httpapi.Module,
 		resolver.Module,
 		outbox.Module,
+		consumer.Module,
 		fx.Invoke(announce),
 	)
 }

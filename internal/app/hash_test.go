@@ -198,3 +198,37 @@ func TestBusinessFieldsChangeHash(t *testing.T) {
 		seen[hash] = field
 	}
 }
+
+func TestMessageHashCoversTheKey(t *testing.T) {
+	tests := []struct {
+		key       string
+		canonical string
+		hash      string
+	}{
+		{
+			"provider-a:transaction-123",
+			`{"externalTransactionId":"transaction-123","gameId":"fortune-chimp","idempotencyKey":"provider-a:transaction-123","kind":"BET","money":{"amount":"25.00","currency":"BRL"},"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","providerId":"provider-a","roundId":"round-987","walletId":"0192f291-27dd-7d3f-8071-5f8685deef37"}`,
+			"a0b23737e20f6776c26497494deed2206e9418b3fd3a9dc43203c34866b05244",
+		},
+		{
+			"provider-a:transaction-123:retry",
+			`{"externalTransactionId":"transaction-123","gameId":"fortune-chimp","idempotencyKey":"provider-a:transaction-123:retry","kind":"BET","money":{"amount":"25.00","currency":"BRL"},"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","providerId":"provider-a","roundId":"round-987","walletId":"0192f291-27dd-7d3f-8071-5f8685deef37"}`,
+			"0c38d772511c1c31b5767b5b1b36eafd4ea94feead9ef25bb383b6573e5b60d2",
+		},
+	}
+	for _, tt := range tests {
+		cmd, err := app.WagerTransactionRequestedData{WagerRequest: bet(), IdempotencyKey: tt.key}.Command("msg-123")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(app.CanonicalMessage(cmd)); got != tt.canonical {
+			t.Fatalf("canonical message\ngot  %s\nwant %s", got, tt.canonical)
+		}
+		if got := app.MessageHash(cmd); got != tt.hash {
+			t.Fatalf("message hash with key %q = %s; want %s", tt.key, got, tt.hash)
+		}
+		if cmd.PayloadHash != betHash {
+			t.Fatalf("payload hash with key %q = %s; want %s regardless of the key", tt.key, cmd.PayloadHash, betHash)
+		}
+	}
+}

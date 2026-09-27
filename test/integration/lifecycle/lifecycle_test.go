@@ -22,6 +22,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/config"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
 	"github.com/mhetem/backend-challenge-go-jungle/test/integration/dbtest"
+	"github.com/mhetem/backend-challenge-go-jungle/test/integration/sqstest"
 )
 
 func testConfig(t *testing.T, databaseURL string) config.Config {
@@ -67,6 +68,8 @@ func (c client) get(url string) (int, string) {
 func TestServiceStartsServesAndStopsCleanly(t *testing.T) {
 	db := dbtest.New(t)
 	cfg := testConfig(t, db.AppURL)
+	input := sqstest.New(t, 10)
+	cfg.SQS.InputQueue, cfg.SQS.InputDLQ = input.Input, input.DLQ
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	var (

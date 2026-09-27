@@ -345,6 +345,31 @@ outro jogador. As demais guardam o saldo observado na rejeição, e o replay o d
 
 ## Inbox e outbox
 
+Inbox:
+- Toda mensagem de `wager-transactions.fifo` passa por `inbox_messages`, com chave
+  `(consumer_name, message_id)`. O consumidor se chama `wager-transactions` em toda
+  instância, e `message_id` é o `messageId` do envelope, não o id que o SQS dá a cada envio.
+- O hash da inbox é o SHA-256 do JSON canônico do `data`: os mesmos campos do hash do
+  payload, mais `idempotencyKey`. O mesmo `messageId` com outra chave é outra mensagem.
+- Tudo acontece na transação SQL das mudanças do domínio:
+  1. `INSERT … ON CONFLICT DO NOTHING` na inbox;
+  2. linha existente com o mesmo hash: duplicata. Nada mais é feito e a mensagem é apagada
+     da fila;
+  3. linha existente com outro hash: a mensagem vai para a DLQ (`INBOX_HASH_MISMATCH`);
+  4. senão, o provider é conferido, o caso de uso roda (o mesmo do HTTP) e a linha é
+     concluída com `completed_at`, `outcome` e `transaction_id`, tudo antes do commit.
+- `outcome` é o status da transação criada (`PROCESSED`, `REJECTED` ou
+  `PENDING_REFERENCE`), ou `REPLAYED` quando a chave de idempotência já pertencia a uma
+  operação, vinda por HTTP ou por outra mensagem.
+- Registro e conclusão estão na mesma transação, então uma linha gravada está sempre
+  concluída. Uma entrega concorrente da mesma mensagem espera no `INSERT` até a primeira
+  terminar, e então a encontra como duplicata.
+- `PENDING_REFERENCE` conclui a mensagem: a pendência já está gravada e o resolver continua
+  a partir dela.
+- A inbox deduplica entregas da mesma mensagem. A chave de idempotência deduplica a operação
+  entre mensagens e canais. Uma não substitui a outra.
+- Retenção e limpeza da inbox ficam fora do escopo, como na outbox.
+
 Outbox:
 - Os eventos são gravados em `outbox_events` na mesma transação SQL da mudança que os causou
   (transação, lançamento, saldo). Nada é publicado antes do commit, porque só o worker
@@ -383,6 +408,83 @@ Outbox:
 - Retenção e limpeza da outbox ficam fora do escopo, e o papel da aplicação não apaga linhas.
 
 ## Contratos SQS
+
+Entrada: `wager-transactions.fifo`, com DLQ `wager-transactions-dlq.fifo`.
+
+| Campo do envelope | Regra |
+|---|---|
+| `messageId` | Obrigatório, de 1 a 128 caracteres ASCII visíveis. Identidade durável na inbox e `correlationId` da operação |
+| `type` | `WagerTransactionRequested` |
+| `occurredAt` | Obrigatório, RFC 3339. Só informativo |
+| `data` | O mesmo contrato do corpo de `POST /wagering/transactions`, mais `idempotencyKey` |
+
+Campos desconhecidos são recusados, no envelope e no `data`, como no HTTP.
+
+Produção:
+
+| Atributo SQS | Valor |
+|---|---|
+| `MessageGroupId` | `walletId`: ordem por carteira, carteiras diferentes em paralelo |
+| `MessageDeduplicationId` | `messageId`. O SQS deduplica por 5 minutos; a inbox e a chave de idempotência, para sempre |
+
+`scripts/send-wager.sh <walletId> <playerId> [kind] [amount] [externalTransactionId]
+[referenceExternalTransactionId]` envia um envelope assim pela AWS CLI do compose.
+`MESSAGE_ID`, `DEDUP_ID` e `IDEMPOTENCY_KEY` sobrescrevem os padrões.
+
+Consumo:
+- Toda instância roda `CONSUMER_WORKERS` receivers (4, componente `consumer`), sem líder.
+  Cada um faz long polling de `CONSUMER_WAIT_TIME` (20 s) por até 10 mensagens, pede
+  `ApproximateReceiveCount` e `MessageGroupId`, e manda `SQS_VISIBILITY_TIMEOUT` (30 s) no
+  próprio receive. Assim vale a visibilidade da configuração, qualquer que seja a da fila.
+- As mensagens de um lote são tratadas em ordem, cada uma com prazo de
+  `CONSUMER_MESSAGE_TIMEOUT` (10 s).
+- A mensagem só é apagada depois do commit.
+
+| Situação | Ação | `failureReason` |
+|---|---|---|
+| Processada, rejeitada por regra de negócio, pendente de referência, replay ou duplicata | Apagada | — |
+| Corpo que não é um envelope válido | DLQ, depois apagada | `MALFORMED_MESSAGE` |
+| Outro `type` | DLQ, depois apagada | `UNSUPPORTED_MESSAGE_TYPE` |
+| `data` inválido: formato, `OPENING`, política de valor zero, referência faltando | DLQ, depois apagada | `INVALID_REQUEST` |
+| Provider que não existe no banco | DLQ, depois apagada | `UNKNOWN_PROVIDER` |
+| Mesmo `messageId` com outro conteúdo | DLQ, depois apagada | `INBOX_HASH_MISMATCH` |
+| Conflito de idempotência | DLQ, depois apagada | `IDEMPOTENCY_KEY_REUSED` ou `EXTERNAL_TRANSACTION_ID_CONFLICT` |
+| Erro permanente: integridade, estado gravado corrompido | DLQ, depois apagada | `PROCESSING_FAILED` |
+| Erro transitório: banco fora, lock timeout, conflito repetido até o limite | Visibilidade de `min(2^receiveCount, 300)` s | — |
+
+- A DLQ recebe o corpo original, no mesmo `MessageGroupId`, com os atributos
+  `failureReason` e `failureDetail` (a mensagem do erro, até 1000 bytes). O
+  `MessageDeduplicationId` é o id SQS da mensagem de origem: se o delete falha e a mensagem
+  volta, o segundo envio para a DLQ é descartado dentro de 5 minutos.
+- Se o envio para a DLQ falha, a mensagem continua na fila e volta com o backoff de um erro
+  transitório. Nada é apagado sem ter chegado à DLQ.
+- Erros transitórios chegam à DLQ pela redrive policy, não pelo consumer. Com
+  `maxReceiveCount` 10, isso leva uns 18 minutos de tentativas
+  (2 + 4 + … + 256 + 300 + 300 s). Essas mensagens chegam sem `failureReason`.
+- Ordem FIFO: quando uma mensagem volta para a fila com atraso, as seguintes do mesmo grupo
+  no mesmo lote não são tratadas e recebem visibilidade 0. A primeira continua in flight,
+  então o SQS só volta a entregar o grupo a partir dela, na ordem original.
+- Portão do banco: antes de cada receive, o receiver faz ping no pool (2 s). Se o banco não
+  responde, ele não recebe e tenta de novo a cada segundo. Durante uma queda do banco, as
+  mensagens esperam na fila sem gastar recebimentos, e a redrive policy não as manda para a
+  DLQ.
+
+Shutdown (`SIGTERM`):
+1. O contexto de polling é cancelado. Nenhum receive novo começa, e o long poll em andamento
+   é interrompido.
+2. A mensagem em processamento termina, num contexto que o shutdown não cancela, limitado a
+   `CONSUMER_MESSAGE_TIMEOUT`. A configuração exige esse prazo menor que `SHUTDOWN_TIMEOUT`.
+3. As demais mensagens do lote recebem visibilidade 0 e ficam disponíveis na hora para
+   qualquer instância.
+4. O worker espera as goroutines terminarem.
+
+Métricas:
+- `wallet_consumer_messages_total{outcome=processed|rejected|pending_reference|replayed|duplicate|retried|dead_lettered|released}`.
+  `duplicate` prova que a reentrega chegou à aplicação e foi barrada pela inbox;
+- `wallet_consumer_dead_letters_total{reason}`;
+- `wallet_consumer_processing_seconds` (histograma, do recebimento até a mensagem ser
+  apagada, adiada ou mandada para a DLQ);
+- `wallet_consumer_paused`, 1 enquanto o portão do banco segura os receives.
 
 ## Contratos e roteamento de eventos
 
@@ -607,6 +709,9 @@ abre conexão nem inicia goroutine. Cada módulo registra os seus hooks num úni
 | `metrics` | registry Prometheus, `app.Metrics`, servidor admin | start/stop do servidor admin (`/metrics`, `/health/*`) |
 | `app` | `WalletService`, `WagerService`, regras, relógio, ids | — |
 | `httpapi` | servidor HTTP público | start/stop, só com o componente `http` ativo |
+| `resolver` | worker de referências pendentes | start/stop, só com o componente `resolver` |
+| `outbox` | publisher da outbox | start/stop, só com o componente `outbox` |
+| `consumer` | `CONSUMER_WORKERS` receivers da fila de entrada | start/stop, só com o componente `consumer` |
 
 Sequência:
 - O `main` carrega a configuração antes do Fx. Qualquer valor inválido encerra o processo
@@ -617,7 +722,9 @@ Sequência:
   - O servidor faz `net.Listen` dentro do hook, então porta ocupada falha a inicialização.
 - **Stop:** ordem inversa, dentro de `SHUTDOWN_TIMEOUT`.
   1. O primeiro passo é o drain: a readiness passa a responder 503.
-  2. Os workers (fases 10–12) cancelam o contexto e esperam as goroutines.
+  2. Os workers param na ordem inversa do registro: consumer, publisher, resolver. Cada um
+     cancela o seu contexto e espera as goroutines. O consumer termina a mensagem em
+     andamento e devolve o resto do lote para a fila (ver *Contratos SQS*).
   3. Os servidores fazem `Shutdown` e terminam as requisições em andamento.
   4. O SQS fecha as conexões ociosas.
   5. Por último, o pool fecha, depois de tudo que o usa.
@@ -643,7 +750,7 @@ Sequência:
     (`GET /wallets/{walletId}`), não a URL, então a cardinalidade fica limitada;
   - `wallet_reconciliation_divergences_total`.
 
-  As métricas de consumer, outbox e resolver entram nas fases correspondentes.
+  As métricas do resolver, do publisher da outbox e do consumer estão nas seções de cada um.
 - Health checks:
   - `/health/live` responde 200 enquanto o processo está de pé;
   - `/health/ready` testa PostgreSQL (`ping`) e SQS (`GetQueueAttributes` na fila de
@@ -667,3 +774,11 @@ Sequência:
   simultâneas, mas não limita a frequência. Um limite por intervalo fica como trabalho
   pendente.
 - Tokens revogados continuam aceitos até expirar (validação local, sem introspecção).
+- Um long poll interrompido pelo shutdown pode já ter reservado mensagens que a instância
+  nunca vê. Elas voltam quando a visibilidade expira (30 s), com um recebimento a mais.
+- Quando uma mensagem volta para a fila com atraso, as seguintes do mesmo grupo que vieram
+  no mesmo lote também contam um recebimento, sem ter sido tentadas. Um bloqueio longo numa
+  carteira pode levar para a DLQ, junto com a primeira, as mensagens daquele lote.
+- Um lote que demora mais que a visibilidade pode ter mensagens entregues de novo a outra
+  instância enquanto ainda esperam a vez na primeira. A inbox transforma a segunda execução
+  em duplicata, e o delete com o receipt handle vencido só gera um aviso no log.

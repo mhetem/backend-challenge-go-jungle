@@ -19,6 +19,8 @@ var (
 var (
 	ErrIdempotencyKeyReused = &domain.Error{Code: "IDEMPOTENCY_KEY_REUSED", Category: domain.Conflict}
 	ErrExternalIDConflict   = &domain.Error{Code: "EXTERNAL_TRANSACTION_ID_CONFLICT", Category: domain.Conflict}
+	ErrInboxHashMismatch    = &domain.Error{Code: "INBOX_HASH_MISMATCH", Category: domain.Conflict}
+	ErrUnknownProvider      = &domain.Error{Code: "UNKNOWN_PROVIDER", Category: domain.Invalid}
 )
 
 type WalletExistsError struct {
