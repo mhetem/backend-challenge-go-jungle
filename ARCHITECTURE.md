@@ -760,6 +760,41 @@ Sequência:
   - os dois endpoints existem na porta pública e na admin. O healthcheck do container
     (`wallet healthcheck`) usa a admin, que existe mesmo com o componente `http` desligado.
 
+## Múltiplas instâncias e injeção de falhas
+
+Pontos de falha:
+- `internal/platform/failpoint` define cinco pontos: `consumer.after_commit`,
+  `outbox.after_claim`, `outbox.after_publish`, `resolver.after_reschedule` e
+  `usecase.after_pending_reference_commit`.
+- No build padrão, `failpoint.Hit` é uma função vazia que o compilador elimina, então o
+  binário de produção não tem código de falha.
+- Com a build tag `failpoints`, `FAILPOINTS=nome=exit,…` faz o processo sair com
+  `os.Exit(137)` no ponto indicado, sem defers nem shutdown, como um `SIGKILL`. Um nome ou
+  uma ação desconhecidos derrubam o processo já na inicialização.
+
+Suíte e2e (`test/e2e`, tag `e2e`):
+- Compila o serviço com `-race -tags failpoints` e sobe processos independentes, cada um com
+  as suas portas, o seu pool e a sua memória, sobre um banco e filas (entrada, DLQ e eventos)
+  criados só para o teste. As portas são escolhidas pelo sistema operacional e lidas do log.
+- `GORACE=halt_on_error=1` faz um data race encerrar o processo com código 66, e o teste
+  falha. Um processo que sai sem ter sido mandado, ou que não sai com 0 depois de `SIGTERM`,
+  também falha o teste.
+- Todo cenário termina com a reconciliação das carteiras envolvidas.
+
+| Cenário | O que prova |
+|---|---|
+| 2 × 80,00 sobre 100,00, cada aposta numa instância | Um débito, saldo de 20,00, replays iguais ao original |
+| A mesma `BET` 50 vezes: 30 por HTTP nas três instâncias, 20 por SQS | Uma transação e um débito |
+| 8 carteiras × 6 operações, metade por HTTP e metade por SQS | Progresso em paralelo com saldos corretos |
+| HTTP e depois SQS; HTTP e SQS ao mesmo tempo | Um único efeito por operação |
+| Consumer morto depois do commit | A reentrega chega a outra instância e a inbox a trata como duplicata |
+| Publisher morto depois do claim e depois do publish | Outra instância publica quando o lease vence, com o mesmo `eventId` |
+| Morte logo depois de gravar `PENDING_REFERENCE` | O retry do cliente é um replay, e outra instância resolve a referência |
+| Resolver morto depois de reagendar | Outra instância continua, e o TTL rejeita com `REFERENCE_NOT_FOUND` e evento |
+| Reinício de todas as instâncias, uma com `SIGKILL` | Replays, inbox e pendências sobrevivem |
+| `SIGTERM` em duas de três instâncias sob carga | Drenagem sem perda nem duplicação |
+| `docker compose pause postgres` e `pause aws` | 503 e consumer pausado durante a queda, nada perdido depois |
+
 ## Limitações, interpretações e trabalho pendente
 
 - O IAM não é aplicado localmente. Os usuários e policies por papel continuam sendo
@@ -782,3 +817,7 @@ Sequência:
 - Um lote que demora mais que a visibilidade pode ter mensagens entregues de novo a outra
   instância enquanto ainda esperam a vez na primeira. A inbox transforma a segunda execução
   em duplicata, e o delete com o receipt handle vencido só gera um aviso no log.
+- O cliente HTTP do SDK da AWS não tem timeout próprio. Com o SQS congelado, o publisher fica
+  bloqueado em vez de falhar e recuar; quando o lease vence, outra instância assume os mesmos
+  eventos, e a deduplicação FIFO descarta o envio repetido. Nada se perde, mas o backoff da
+  outbox só age em erros, não em chamadas travadas.

@@ -18,17 +18,20 @@ import (
 )
 
 type Queues struct {
-	t        *testing.T
-	API      *awssqs.Client
-	Input    string
-	InputURL string
-	DLQ      string
-	DLQURL   string
+	t         *testing.T
+	API       *awssqs.Client
+	Input     string
+	InputURL  string
+	DLQ       string
+	DLQURL    string
+	Events    string
+	EventsURL string
 }
 
 type Message struct {
 	Body       string
 	GroupID    string
+	DedupID    string
 	Attributes map[string]string
 }
 
@@ -41,7 +44,9 @@ func New(t *testing.T, maxReceiveCount int) *Queues {
 		t.Fatalf("aws config: %v", err)
 	}
 	suffix := uuid.NewString()[:8]
-	q := &Queues{t: t, API: awssqs.NewFromConfig(cfg), Input: "input-" + suffix + ".fifo", DLQ: "input-dlq-" + suffix + ".fifo"}
+	q := &Queues{t: t, API: awssqs.NewFromConfig(cfg), Input: "input-" + suffix + ".fifo", DLQ: "input-dlq-" + suffix + ".fifo",
+		Events: "events-" + suffix + ".fifo"}
+	q.EventsURL = q.create(q.Events, nil)
 	q.DLQURL = q.create(q.DLQ, nil)
 	arn := q.attribute(q.DLQURL, types.QueueAttributeNameQueueArn)
 	q.InputURL = q.create(q.Input, map[string]string{
@@ -103,11 +108,13 @@ func (q *Queues) Drain(url string, want int, wait time.Duration) []Message {
 	deadline := time.Now().Add(wait)
 	for len(got) < want && time.Now().Before(deadline) {
 		out, err := q.API.ReceiveMessage(context.Background(), &awssqs.ReceiveMessageInput{
-			QueueUrl:                    aws.String(url),
-			MaxNumberOfMessages:         10,
-			WaitTimeSeconds:             1,
-			MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameMessageGroupId},
-			MessageAttributeNames:       []string{"All"},
+			QueueUrl:            aws.String(url),
+			MaxNumberOfMessages: 10,
+			WaitTimeSeconds:     1,
+			MessageSystemAttributeNames: []types.MessageSystemAttributeName{
+				types.MessageSystemAttributeNameMessageGroupId, types.MessageSystemAttributeNameMessageDeduplicationId,
+			},
+			MessageAttributeNames: []string{"All"},
 		})
 		if err != nil {
 			q.t.Fatalf("receive: %v", err)
@@ -120,6 +127,7 @@ func (q *Queues) Drain(url string, want int, wait time.Duration) []Message {
 			got = append(got, Message{
 				Body:       aws.ToString(m.Body),
 				GroupID:    m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)],
+				DedupID:    m.Attributes[string(types.MessageSystemAttributeNameMessageDeduplicationId)],
 				Attributes: attrs,
 			})
 			if _, err := q.API.DeleteMessage(context.Background(), &awssqs.DeleteMessageInput{QueueUrl: aws.String(url), ReceiptHandle: m.ReceiptHandle}); err != nil {

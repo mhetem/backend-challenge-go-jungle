@@ -11,6 +11,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wager"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wallet"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/failpoint"
 )
 
 type WagerResult struct {
@@ -38,6 +39,9 @@ func (s *WagerService) Submit(ctx context.Context, cmd SubmitWager) (WagerResult
 	})
 	if err != nil {
 		return WagerResult{}, err
+	}
+	if result.Transaction.Status == wager.PendingReference && !result.IdempotentReplay {
+		failpoint.Hit(failpoint.UsecaseAfterPendingReferenceCommit)
 	}
 	return result, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wager"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/config"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/failpoint"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/lifecycle"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/logging"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
@@ -114,7 +115,11 @@ func (r *Resolver) resolve(ctx context.Context, d app.DueTransaction) {
 	case err == nil:
 		delete(r.failures, d.ID)
 		r.outcomes.WithLabelValues(outcome(res)).Inc()
-		if !res.Skipped && res.Status != wager.PendingReference {
+		switch {
+		case res.Skipped:
+		case res.Status == wager.PendingReference:
+			failpoint.Hit(failpoint.ResolverAfterReschedule)
+		default:
 			r.log.InfoContext(ctx, "pending reference settled", "status", res.Status)
 		}
 	case ctx.Err() != nil || errors.Is(err, app.ErrTransient) || errors.Is(err, app.ErrRetryableConflict):

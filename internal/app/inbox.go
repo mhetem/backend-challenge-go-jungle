@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/mhetem/backend-challenge-go-jungle/internal/domain/wager"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/failpoint"
 )
 
 const OutcomeReplayed = "REPLAYED"
@@ -25,6 +28,9 @@ func (s *WagerService) SubmitMessage(ctx context.Context, consumer, messageID st
 	})
 	if err != nil {
 		return MessageResult{}, err
+	}
+	if !result.Duplicate && result.Outcome == string(wager.PendingReference) {
+		failpoint.Hit(failpoint.UsecaseAfterPendingReferenceCommit)
 	}
 	return result, nil
 }

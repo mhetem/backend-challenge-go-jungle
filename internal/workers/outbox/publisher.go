@@ -12,6 +12,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/adapters/sqs"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/config"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/failpoint"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/lifecycle"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/metrics"
 )
@@ -119,6 +120,9 @@ func (p *Publisher) Tick(ctx context.Context) int {
 		}
 		return 0
 	}
+	if len(claimed) > 0 {
+		failpoint.Hit(failpoint.OutboxAfterClaim)
+	}
 	for chunk := range slices.Chunk(claimed, sqs.MaxBatch) {
 		p.publish(ctx, chunk)
 	}
@@ -132,6 +136,7 @@ type settled struct {
 
 func (p *Publisher) publish(ctx context.Context, chunk []app.OutboxMessage) {
 	errs := p.sender.PublishEvents(ctx, chunk)
+	failpoint.Hit(failpoint.OutboxAfterPublish)
 	now := p.clock()
 	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markTimeout)
 	defer cancel()

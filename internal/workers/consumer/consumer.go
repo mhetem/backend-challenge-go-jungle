@@ -20,6 +20,7 @@ import (
 	"github.com/mhetem/backend-challenge-go-jungle/internal/app"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/domain"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/config"
+	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/failpoint"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/health"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/lifecycle"
 	"github.com/mhetem/backend-challenge-go-jungle/internal/platform/logging"
@@ -199,6 +200,7 @@ func (c *Consumer) process(ctx context.Context, m sqs.Message) bool {
 	cancel()
 	switch {
 	case err == nil:
+		failpoint.Hit(failpoint.ConsumerAfterCommit)
 		return c.complete(ctx, m, res)
 	case transient(err):
 		return c.retry(ctx, m, err)
